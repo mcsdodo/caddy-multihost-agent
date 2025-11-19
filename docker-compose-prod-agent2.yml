@@ -1,6 +1,6 @@
 services:
   caddy-agent:
-    image: caddy-agent:phase2
+    image: caddy-agent:phase3
     container_name: caddy-agent-remote
     restart: unless-stopped
     volumes:
@@ -67,3 +67,18 @@ services:
       caddy_20: phase2-import.lan
       caddy_20.import: test_snippet
       caddy_20.reverse_proxy: "{{upstreams 5681}}"
+
+  # Phase 3 test - header manipulation (header_up)
+  test-header-manipulation:
+    image: hashicorp/http-echo
+    container_name: test-header-manipulation
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -listen=:5682
+      - -text=Phase 3 - Header manipulation on host2
+    labels:
+      caddy_30: phase3-headers.lan
+      caddy_30.reverse_proxy: "{{upstreams 5682}}"
+      caddy_30.reverse_proxy.header_up: "-X-Forwarded-For"
+      caddy_30.reverse_proxy.header_down: "-Server"

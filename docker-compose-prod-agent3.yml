@@ -1,6 +1,6 @@
 services:
   caddy-agent:
-    image: caddy-agent:phase2
+    image: caddy-agent:phase3
     container_name: caddy-agent-remote3
     restart: unless-stopped
     volumes:

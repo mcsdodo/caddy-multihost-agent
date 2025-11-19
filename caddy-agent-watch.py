@@ -103,13 +103,15 @@ def get_caddy_routes():
     if global_settings:
         logger.info(f"Global settings: {list(global_settings.keys())}")
 
-    # Second pass: build routes with imports applied
+    # Second pass: build routes with imports applied and collect TLS DNS policies
+    tls_dns_policies = []
     for container in containers:
         labels = container.attrs['Config']['Labels']
-        container_routes = parse_container_labels(container, labels, host_ip, snippets)
+        container_routes, container_tls_policies = parse_container_labels(container, labels, host_ip, snippets)
         routes.extend(container_routes)
+        tls_dns_policies.extend(container_tls_policies)
 
-    return routes, global_settings
+    return routes, global_settings, tls_dns_policies
 
 def parse_globals_and_snippets(labels):
     """Extract global settings and snippet definitions from labels.
@@ -201,11 +203,14 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
 
     # Generate routes from parsed configurations
     routes = []
+    tls_dns_policies = []  # Collect TLS DNS policies for automation
     for route_num, config in sorted(route_configs.items()):
         domain = config.get('domain')
+        logger.info(f"Processing route {route_num}: domain={domain}, config_keys={list(config.keys())}")
 
         # Skip snippets and global settings (no domain or snippet pattern)
         if not domain or (domain.startswith('(') and domain.endswith(')')):
+            logger.info(f"Skipping route {route_num} (no domain or snippet)")
             continue
 
         # Phase 2: Apply imports from snippets
@@ -216,6 +221,7 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
                 # Merge snippet config into this route (snippet directives come first, then route overrides)
                 merged_config = {**snippets[snippet_name], **config}
                 config = merged_config
+                logger.info(f"Merged config keys after import: {list(config.keys())}")
             else:
                 logger.warning(f"Snippet '{snippet_name}' not found for route {route_num}")
 
@@ -249,10 +255,15 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
         # Phase 2: Add TLS configuration if present
         tls_config = parse_tls_config(config)
         transport_config = parse_transport_config(config)
+        header_config = parse_header_config(config)
 
         if transport_config:
             # Apply transport config to reverse_proxy handler
             handle[0].update(transport_config)
+
+        # Phase 3: Apply header manipulation
+        if header_config:
+            handle[0].update(header_config)
 
         # Phase 2: Add handle directives (handle.abort, etc.)
         handle_directives = parse_handle_directives(config)
@@ -270,24 +281,29 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
 
         # Add TLS config if present (for wildcard certificates, etc.)
         if tls_config:
-            route["terminal"] = True  # Mark as terminal for TLS-specific routes
-            # TLS automation policies are applied at server level, not route level
-            # Store them for later application
-            route["_tls_config"] = tls_config
+            # Create TLS automation policy for this domain
+            tls_policy = {
+                "subjects": domains,  # Apply to these specific domains
+                "tls_config": tls_config
+            }
+            tls_dns_policies.append(tls_policy)
+            logger.info(f"TLS DNS policy created for domains: {domains}")
 
         routes.append(route)
 
-    return routes
+    return routes, tls_dns_policies
 
 def parse_tls_config(config):
     """Parse TLS configuration directives.
     Supports: tls.dns, tls.resolvers
     """
     tls_config = {}
+    logger.info(f"parse_tls_config: checking config keys: {list(config.keys())}")
 
     for key, value in config.items():
         if key.startswith('tls.'):
             directive = key[4:]  # Remove 'tls.' prefix
+            logger.info(f"Found TLS directive: {key} = {value}")
 
             if directive == 'dns':
                 # Parse: "cloudflare ${CF_API_TOKEN}" or "cloudflare {env.CF_API_TOKEN}"
@@ -341,6 +357,88 @@ def parse_transport_config(config):
                 logger.info("Transport: TLS insecure skip verify enabled")
 
     return transport_config
+
+def parse_header_config(config):
+    """Parse header manipulation directives.
+    Supports:
+    - reverse_proxy.header_up: Modify request headers sent to backend
+    - reverse_proxy.header_down: Modify response headers sent to client
+
+    Formats:
+    - -HeaderName: Remove header
+    - +HeaderName "value": Add header with value
+    - HeaderName "value": Set header to value (replaces existing)
+
+    Returns Caddy JSON structure:
+    {
+        "headers": {
+            "request": {
+                "set": {"Header": ["value"]},
+                "delete": ["Header"]
+            },
+            "response": {
+                "set": {"Header": ["value"]},
+                "delete": ["Header"]
+            }
+        }
+    }
+    """
+    headers_config = {}
+
+    for key, value in config.items():
+        if key.startswith('reverse_proxy.header_up'):
+            # Parse header_up directives (request headers)
+            if 'headers' not in headers_config:
+                headers_config['headers'] = {}
+            if 'request' not in headers_config['headers']:
+                headers_config['headers']['request'] = {}
+
+            if value.startswith('-'):
+                # Remove header: -X-Forwarded-For
+                header_name = value[1:].strip()
+                if 'delete' not in headers_config['headers']['request']:
+                    headers_config['headers']['request']['delete'] = []
+                headers_config['headers']['request']['delete'].append(header_name)
+                logger.info(f"Header up: removing {header_name}")
+            else:
+                # Set/Add header: HeaderName "value" or +HeaderName "value"
+                clean_value = value[1:].strip() if value.startswith('+') else value
+                parts = clean_value.split(None, 1)
+                if len(parts) == 2:
+                    header_name = parts[0]
+                    header_value = parts[1].strip('"')
+                    if 'set' not in headers_config['headers']['request']:
+                        headers_config['headers']['request']['set'] = {}
+                    headers_config['headers']['request']['set'][header_name] = [header_value]
+                    logger.info(f"Header up: setting {header_name} = {header_value}")
+
+        elif key.startswith('reverse_proxy.header_down'):
+            # Parse header_down directives (response headers)
+            if 'headers' not in headers_config:
+                headers_config['headers'] = {}
+            if 'response' not in headers_config['headers']:
+                headers_config['headers']['response'] = {}
+
+            if value.startswith('-'):
+                # Remove header: -Server
+                header_name = value[1:].strip()
+                if 'delete' not in headers_config['headers']['response']:
+                    headers_config['headers']['response']['delete'] = []
+                headers_config['headers']['response']['delete'].append(header_name)
+                logger.info(f"Header down: removing {header_name}")
+            else:
+                # Set/Add header: Server "value" or +HeaderName "value"
+                clean_value = value[1:].strip() if value.startswith('+') else value
+                parts = clean_value.split(None, 1)
+                if len(parts) == 2:
+                    header_name = parts[0]
+                    header_value = parts[1].strip('"')
+                    if 'set' not in headers_config['headers']['response']:
+                        headers_config['headers']['response']['set'] = {}
+                    headers_config['headers']['response']['set'][header_name] = [header_value]
+                    logger.info(f"Header down: setting {header_name} = {header_value}")
+
+    return headers_config
 
 def parse_handle_directives(config):
     """Parse handle directives.
@@ -420,14 +518,16 @@ def resolve_upstreams(container, proxy_target, domain, host_ip):
         logger.error(f"Failed to resolve {{{{upstreams {port}}}}} for {container.name}: {e}")
         return None
 
-def push_to_caddy(routes, global_settings=None):
+def push_to_caddy(routes, global_settings=None, tls_dns_policies=None):
     """Push routes to Caddy server based on mode.
-    Phase 2: Apply global settings if provided.
+    Phase 2: Apply global settings and TLS DNS policies if provided.
     """
     target_url = get_target_caddy_url()
 
     if global_settings is None:
         global_settings = {}
+    if tls_dns_policies is None:
+        tls_dns_policies = []
 
     # Build headers
     headers = {"Content-Type": "application/json"}
@@ -457,11 +557,16 @@ def push_to_caddy(routes, global_settings=None):
         server_name = list(servers.keys())[0]
         if "routes" not in servers[server_name]:
             servers[server_name]["routes"] = []
+        # Ensure server has both HTTP and HTTPS listeners
+        if "listen" not in servers[server_name]:
+            servers[server_name]["listen"] = [":80", ":443"]
+        elif ":443" not in servers[server_name]["listen"]:
+            servers[server_name]["listen"].append(":443")
         local_routes = servers[server_name].get("routes", [])
     else:
-        # Create new server
+        # Create new server with HTTP and HTTPS listeners
         servers["reverse_proxy"] = {
-            "listen": [":80"],
+            "listen": [":80", ":443"],
             "routes": []
         }
         server_name = "reverse_proxy"
@@ -470,6 +575,12 @@ def push_to_caddy(routes, global_settings=None):
     # Phase 2: Apply global settings to server config
     if global_settings:
         apply_global_settings(config, server_name, global_settings)
+
+    # Phase 2: Apply TLS DNS policies
+    logger.info(f"DEBUG: tls_dns_policies count: {len(tls_dns_policies) if tls_dns_policies else 0}")
+    if tls_dns_policies:
+        logger.info(f"DEBUG: Calling apply_tls_dns_policies with {len(tls_dns_policies)} policies")
+        apply_tls_dns_policies(config, tls_dns_policies)
 
     # Merge routes
     merged_routes = merge_routes(local_routes, routes)
@@ -538,6 +649,92 @@ def apply_global_settings(config, server_name, global_settings):
                 server_config['automatic_https']['prefer_wildcard'] = True
                 logger.info("Automatic HTTPS: prefer_wildcard enabled")
 
+def apply_tls_dns_policies(config, tls_dns_policies):
+    """Apply TLS DNS challenge policies to Caddy TLS automation.
+    Creates automation policies for DNS-01 challenge with Cloudflare provider.
+
+    IMPORTANT: Policies with specific subjects must come BEFORE catch-all policies (no subjects).
+    """
+    # Ensure TLS app structure exists
+    if 'tls' not in config['apps']:
+        config['apps']['tls'] = {}
+    if 'automation' not in config['apps']['tls']:
+        config['apps']['tls']['automation'] = {}
+    if 'policies' not in config['apps']['tls']['automation']:
+        config['apps']['tls']['automation']['policies'] = []
+
+    policies = config['apps']['tls']['automation']['policies']
+
+    for policy_data in tls_dns_policies:
+        subjects = policy_data['subjects']
+        tls_config = policy_data['tls_config']
+
+        # Build DNS challenge configuration
+        if 'dns_provider' in tls_config and 'dns_token' in tls_config:
+            provider = tls_config['dns_provider']
+            token = tls_config['dns_token']
+
+            # Create issuer with DNS challenge
+            # Use the email from global_settings if available
+            issuer = {
+                "module": "acme",
+                "challenges": {
+                    "dns": {
+                        "provider": {
+                            "name": provider,
+                            "api_token": token  # Can be {env.VAR} or ${VAR}
+                        }
+                    }
+                }
+            }
+
+            # Add email to DNS issuer (use first non-empty email from default policy)
+            for policy in config['apps']['tls']['automation']['policies']:
+                if 'issuers' in policy and policy['issuers']:
+                    for issuer_check in policy['issuers']:
+                        if 'email' in issuer_check and issuer_check['email']:
+                            issuer['email'] = issuer_check['email']
+                            break
+                    if 'email' in issuer:
+                        break
+
+            # Add resolvers if specified
+            if 'resolvers' in tls_config:
+                issuer['challenges']['dns']['resolvers'] = tls_config['resolvers']
+
+            # Create or update policy for these subjects
+            policy = {
+                "subjects": subjects,
+                "issuers": [issuer]
+            }
+
+            # Check if policy for these subjects already exists
+            existing_policy = None
+            for p in policies:
+                if p.get('subjects') == subjects:
+                    existing_policy = p
+                    break
+
+            if existing_policy:
+                # Update existing policy
+                existing_policy['issuers'] = [issuer]
+                logger.info(f"Updated TLS DNS policy for subjects: {subjects}")
+            else:
+                # Add new policy
+                policies.append(policy)
+                logger.info(f"Added TLS DNS policy for subjects: {subjects} (provider: {provider})")
+
+    # ALWAYS reorder policies: specific subjects first, catch-all (no subjects) last
+    # This is critical for DNS challenge policies to work correctly
+    logger.info(f"Before reordering: {len(policies)} total policies")
+    specific_policies = [p for p in policies if 'subjects' in p and p['subjects']]
+    catch_all_policies = [p for p in policies if 'subjects' not in p or not p['subjects']]
+    logger.info(f"After sorting: {len(specific_policies)} specific, {len(catch_all_policies)} catch-all")
+
+    if len(specific_policies) > 0 or len(catch_all_policies) > 0:
+        config['apps']['tls']['automation']['policies'] = specific_policies + catch_all_policies
+        logger.info(f"TLS policies ordered: {len(specific_policies)} specific first, {len(catch_all_policies)} catch-all last")
+
 def load_local_config():
     """Load local config or fetch from Caddy server"""
     # Always try to fetch current config from Caddy first to preserve routes from all agents
@@ -573,7 +770,7 @@ def load_local_config():
             "http": {
                 "servers": {
                     "reverse_proxy": {
-                        "listen": [":80"],
+                        "listen": [":80", ":443"],
                         "routes": []
                     }
                 }
@@ -643,8 +840,8 @@ def merge_routes(local_routes, new_routes):
 
 def sync_config():
     logger.info("🔄 Syncing config...")
-    routes, global_settings = get_caddy_routes()
-    push_to_caddy(routes, global_settings)
+    routes, global_settings, tls_dns_policies = get_caddy_routes()
+    push_to_caddy(routes, global_settings, tls_dns_policies)
 
 last_update = 0
 debounce_seconds = 5  # Increased debounce to 5 seconds

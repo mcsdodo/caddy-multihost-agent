@@ -1,0 +1,55 @@
+# Environment variables and secrets - CRITICAL: NEVER COMMIT
+.env
+.env.*
+*.env
+!.env.example
+
+# Docker volumes and data
+caddy_data/
+caddy_config/
+
+# Exported Docker images (may contain secrets in env vars)
+*.tar.gz
+*.tar
+
+# Agent output files (may contain config snapshots)
+caddy-output.json
+
+# SSH keys and certificates
+*.pem
+*.key
+!*.pub
+*.crt
+*.csr
+
+# Temporary files
+*.tmp
+*.log
+*.swp
+*.swo
+*~
+
+# IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+
+# Node modules (if any)
+node_modules/
+
+# Build artifacts
+dist/
+build/
+*.egg

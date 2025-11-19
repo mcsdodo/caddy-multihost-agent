@@ -1,15 +1,22 @@
 services:
   caddy:
-    image: caddy:2
+    image: caddy-cloudflare:latest
     container_name: caddy-server
     restart: unless-stopped
     network_mode: host
+    environment:
+      - CF_API_TOKEN=${CF_API_TOKEN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+      - "2019:2019"
     volumes:
       - caddy_data:/data
       - caddy_config:/config
 
   caddy-agent:
-    image: caddy-agent:phase2
+    image: caddy-agent:phase3
     container_name: caddy-agent-server
     restart: unless-stopped
     network_mode: host
@@ -64,22 +71,34 @@ services:
       caddy: test-multi-a.lan, test-multi-b.lan, test-multi-c.lan
       caddy.reverse_proxy: 192.168.0.96:8083
 
-  # Phase 2 test - global settings + snippet definition
-  test-globals-snippet:
+  # Phase 2 test - real-world wildcard certificate with Cloudflare DNS
+  test-wildcard-cert:
     image: hashicorp/http-echo
-    container_name: test-globals-snippet
+    container_name: test-wildcard-cert
     restart: unless-stopped
     network_mode: host
     command:
       - -listen=:8084
-      - -text=Phase 2 - Global settings and snippets on host1
+      - -text=Phase 2 - Real wildcard cert with Cloudflare DNS on *.lacny.me
     labels:
-      caddy_0.email: admin@example.local
+      # Global settings
+      caddy_0.email: ${EMAIL}
       caddy_0.auto_https: prefer_wildcard
-      caddy_1: (test_snippet)
+
+      # Wildcard snippet definition
+      caddy_1: (wildcard)
+      caddy_1.tls.dns: "cloudflare ${CF_API_TOKEN}"
+      caddy_1.tls.resolvers: 1.1.1.1 1.0.0.1
       caddy_1.handle.abort: ""
-      caddy_10: phase2-globals.lan
-      caddy_10.reverse_proxy: 192.168.0.96:8084
+
+      # Wildcard domain using snippet (handle.abort only - for cert acquisition)
+      caddy_10: "*.lacny.me"
+      caddy_10.import: wildcard
+
+      # Specific test subdomain with TLS DNS challenge
+      caddy_20: test-phase2.lacny.me
+      caddy_20.import: wildcard
+      caddy_20.reverse_proxy: 192.168.0.96:8084
 
 volumes:
   caddy_data:
