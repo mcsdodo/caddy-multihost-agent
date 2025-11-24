@@ -1,6 +1,6 @@
 services:
   caddy-agent:
-    image: caddy-agent:phase3
+    image: caddy-agent:latest
     container_name: caddy-agent-remote3
     restart: unless-stopped
     volumes:
@@ -10,7 +10,7 @@ services:
       - AGENT_ID=host3-remote
       - HOST_IP=192.168.0.99
       - DOCKER_LABEL_PREFIX=caddy
-    # No network_mode: host - uses bridge network to test explicit HOST_IP
+    # Bridge network with explicit HOST_IP - tests non-auto-detect code path
 
   # Test service - simple label (backward compatibility)
   test-host3:
@@ -21,7 +21,7 @@ services:
       - "9000:9000"
     command:
       - -listen=:9000
-      - -text=Simple label on host3
+      - -text=Simple label on host3 (bridge)
     labels:
       caddy: test-host3.lan
       caddy.reverse_proxy: "{{upstreams 9000}}"
@@ -35,7 +35,7 @@ services:
       - "9001:9001"
     command:
       - -listen=:9001
-      - -text=Combined features on host3
+      - -text=Combined features on host3 (bridge)
     labels:
       caddy_0: host3-combined-a.lan, host3-combined-b.lan
       caddy_0.reverse_proxy: "{{upstreams 9001}}"
@@ -51,7 +51,7 @@ services:
       - "9002:9002"
     command:
       - -listen=:9002
-      - -text=Mixed labels on host3
+      - -text=Mixed labels on host3 (bridge)
     labels:
       caddy: host3-simple.lan
       caddy.reverse_proxy: "{{upstreams 9002}}"
@@ -67,7 +67,7 @@ services:
       - "9003:9003"
     command:
       - -listen=:9003
-      - -text=Phase 2 - Transport and handle on host3
+      - -text=Phase 2 - Transport on host3 (bridge)
     labels:
       caddy_30: phase2-transport.lan
       caddy_30.reverse_proxy: "{{upstreams 9003}}"

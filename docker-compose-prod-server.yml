@@ -16,7 +16,7 @@ services:
       - caddy_config:/config
 
   caddy-agent:
-    image: caddy-agent:phase3
+    image: caddy-agent:latest
     container_name: caddy-agent-server
     restart: unless-stopped
     network_mode: host
