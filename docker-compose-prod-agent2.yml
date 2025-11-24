@@ -6,11 +6,10 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - AGENT_MODE=agent
+      - CADDY_URL=http://192.168.0.96:2019
       - AGENT_ID=host2-remote
-      - CADDY_SERVER_URL=http://192.168.0.96:2019
-      - HOST_IP=192.168.0.98
       - DOCKER_LABEL_PREFIX=caddy
+      # HOST_IP not set - will auto-detect with network_mode: host
     network_mode: host
 
   # Test service - simple label (backward compatibility)
