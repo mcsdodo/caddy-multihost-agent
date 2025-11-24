@@ -6,19 +6,19 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - AGENT_MODE=agent
+      - CADDY_URL=http://192.168.0.96:2019
       - AGENT_ID=host3-remote
-      - CADDY_SERVER_URL=http://192.168.0.96:2019
       - HOST_IP=192.168.0.99
       - DOCKER_LABEL_PREFIX=caddy
-    network_mode: host
+    # No network_mode: host - uses bridge network to test explicit HOST_IP
 
   # Test service - simple label (backward compatibility)
   test-host3:
     image: hashicorp/http-echo
     container_name: test-host3
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "9000:9000"
     command:
       - -listen=:9000
       - -text=Simple label on host3
@@ -31,7 +31,8 @@ services:
     image: hashicorp/http-echo
     container_name: test-combined
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "9001:9001"
     command:
       - -listen=:9001
       - -text=Combined features on host3
@@ -46,7 +47,8 @@ services:
     image: hashicorp/http-echo
     container_name: test-mixed
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "9002:9002"
     command:
       - -listen=:9002
       - -text=Mixed labels on host3
@@ -61,7 +63,8 @@ services:
     image: hashicorp/http-echo
     container_name: test-transport-handle
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "9003:9003"
     command:
       - -listen=:9003
       - -text=Phase 2 - Transport and handle on host3
