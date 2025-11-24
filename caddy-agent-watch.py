@@ -10,15 +10,16 @@ import time
 import socket
 from copy import deepcopy
 
-# Configuration
-AGENT_MODE = os.getenv("AGENT_MODE", "standalone")  # standalone, server, agent
+# Configuration - Simplified model
+CADDY_URL = os.getenv("CADDY_URL", "http://localhost:2019")
+HOST_IP = os.getenv("HOST_IP", None)  # If set, enables remote mode. Auto-detects with network_mode: host
 AGENT_ID = os.getenv("AGENT_ID", socket.gethostname())
-CADDY_API_URL = os.getenv("CADDY_API_URL", "http://caddy:2019")
-CADDY_SERVER_URL = os.getenv("CADDY_SERVER_URL", "http://localhost:2019")  # For agent mode
 CADDY_API_TOKEN = os.getenv("CADDY_API_TOKEN", "")
-HOST_IP = os.getenv("HOST_IP", None)  # Will auto-detect if not set
 DOCKER_LABEL_PREFIX = os.getenv("DOCKER_LABEL_PREFIX", "caddy")
-AGENT_FILTER_LABEL = os.getenv("AGENT_FILTER_LABEL", None)  # Optional: filter containers by label (e.g., "agent=remote1")
+AGENT_FILTER_LABEL = os.getenv("AGENT_FILTER_LABEL", None)
+
+# Cached effective host IP (computed once at startup)
+_effective_host_ip = None
 
 client = docker.DockerClient(base_url='unix://var/run/docker.sock')
 
@@ -37,6 +38,56 @@ def detect_host_ip():
     except Exception as e:
         logger.warning(f"Failed to auto-detect host IP: {e}. Using 127.0.0.1")
         return "127.0.0.1"
+
+def is_host_network_mode():
+    """Check if the agent container itself is running in host network mode.
+    We detect this by checking if we can see the host's network interfaces.
+    """
+    try:
+        # In host network mode, we can detect the host IP
+        # In bridge mode, detect_host_ip returns the container's gateway
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        # If IP starts with 172.17 or 172.18, we're likely in bridge mode
+        # This is a heuristic - not 100% reliable but good enough
+        return not ip.startswith("172.")
+    except Exception:
+        return False
+
+def get_effective_host_ip():
+    """Get the effective HOST_IP for upstream resolution.
+
+    Returns:
+        str: IP address to use for upstreams (remote mode)
+        None: Use container names/localhost (local mode)
+
+    Logic:
+        1. If HOST_IP is explicitly set, use it
+        2. If running in network_mode: host, auto-detect
+        3. Otherwise, return None (local mode)
+    """
+    global _effective_host_ip
+
+    # Return cached value if already computed
+    if _effective_host_ip is not None:
+        return _effective_host_ip if _effective_host_ip != "" else None
+
+    if HOST_IP:
+        logger.info(f"Using HOST_IP: {HOST_IP} (explicit)")
+        _effective_host_ip = HOST_IP
+        return HOST_IP
+
+    if is_host_network_mode():
+        detected = detect_host_ip()
+        logger.info(f"Using HOST_IP: {detected} (auto-detected, network_mode: host)")
+        _effective_host_ip = detected
+        return detected
+
+    logger.info("Using local addressing (no HOST_IP, container network)")
+    _effective_host_ip = ""  # Empty string means "computed, result is None"
+    return None
 
 def get_published_port(container, internal_port):
     """Get the published (host) port for a given container internal port"""
@@ -59,19 +110,12 @@ def get_published_port(container, internal_port):
         logger.error(f"Error getting published port for {container.name}: {e}")
         return None
 
-def get_target_caddy_url():
-    """Get the target Caddy API URL based on mode"""
-    if AGENT_MODE == "agent":
-        return CADDY_SERVER_URL
-    else:
-        return CADDY_API_URL
-
 def get_caddy_routes():
     """Get routes from Docker containers based on labels"""
     routes = []
     global_settings = {}
     snippets = {}
-    host_ip = HOST_IP or detect_host_ip() if AGENT_MODE == "agent" else None
+    host_ip = get_effective_host_ip()
 
     # First pass: collect snippets and global settings
     containers = []
@@ -475,42 +519,39 @@ def resolve_upstreams(container, proxy_target, domain, host_ip):
         network_mode = container.attrs.get('HostConfig', {}).get('NetworkMode', '')
         is_host_network = network_mode == 'host'
 
-        # Agent mode: use host IP + published port (or direct port for host networking)
-        if AGENT_MODE == "agent":
+        # Remote mode: use host IP + port (when host_ip is available)
+        if host_ip:
             if is_host_network:
                 # Host networking: use host IP + internal port directly
                 resolved = f"{host_ip}:{port}"
-                logger.info(f"[AGENT] Resolved {{{{upstreams {port}}}}} for domain '{domain}' (host network): {resolved}")
+                logger.info(f"[REMOTE] Resolved {{{{upstreams {port}}}}} for domain '{domain}' (host network): {resolved}")
                 return resolved
             else:
                 # Bridge networking: need published port
                 published_port = get_published_port(container, port)
-                if published_port and host_ip:
+                if published_port:
                     resolved = f"{host_ip}:{published_port}"
-                    logger.info(f"[AGENT] Resolved {{{{upstreams {port}}}}} for domain '{domain}': {resolved}")
+                    logger.info(f"[REMOTE] Resolved {{{{upstreams {port}}}}} for domain '{domain}': {resolved}")
                     return resolved
                 else:
-                    logger.error(f"[AGENT] Cannot resolve upstream for {container.name}: port not published or host IP unavailable")
+                    logger.error(f"[REMOTE] Cannot resolve upstream for {container.name}: port {port} not published")
                     return None
-        # Standalone/server mode: use container IP (or host IP for host networking)
+        # Local mode: use container addressing
         else:
             if is_host_network:
                 # Host networking: containers share host network, use localhost
-                network_settings = container.attrs.get('NetworkSettings', {})
-                # In host mode, try to get the host's internal IP or use localhost
                 resolved = f"localhost:{port}"
-                logger.info(f"Resolved {{{{upstreams {port}}}}} for domain '{domain}' (host network): {resolved}")
+                logger.info(f"[LOCAL] Resolved {{{{upstreams {port}}}}} for domain '{domain}' (host network): {resolved}")
                 return resolved
             else:
                 # Bridge networking: use container IP
                 network_settings = container.attrs.get('NetworkSettings', {})
                 networks = network_settings.get('Networks', {})
-                # Use the first network found
                 if networks:
                     ip = list(networks.values())[0].get('IPAddress')
                     if ip:
                         resolved = f"{ip}:{port}"
-                        logger.info(f"Resolved {{{{upstreams {port}}}}} for domain '{domain}': {resolved}")
+                        logger.info(f"[LOCAL] Resolved {{{{upstreams {port}}}}} for domain '{domain}': {resolved}")
                         return resolved
             logger.error(f"Failed to resolve {{{{upstreams {port}}}}} for {container.name}")
             return None
@@ -522,7 +563,7 @@ def push_to_caddy(routes, global_settings=None, tls_dns_policies=None):
     """Push routes to Caddy server based on mode.
     Phase 2: Apply global settings and TLS DNS policies if provided.
     """
-    target_url = get_target_caddy_url()
+    target_url = CADDY_URL
 
     if global_settings is None:
         global_settings = {}
@@ -589,7 +630,9 @@ def push_to_caddy(routes, global_settings=None, tls_dns_policies=None):
     save_local_config(config)
 
     try:
-        logger.info(f"Pushing config to {target_url} [Mode: {AGENT_MODE}]")
+        host_ip = get_effective_host_ip()
+        mode_desc = f"remote (HOST_IP={host_ip})" if host_ip else "local"
+        logger.info(f"Pushing config to {target_url} [Mode: {mode_desc}]")
         response = requests.post(f"{target_url}/load", json=config, headers=headers)
         if response.status_code == 200:
             logger.info(f"✅ Caddy config updated successfully [Agent: {AGENT_ID}]")
@@ -738,7 +781,7 @@ def apply_tls_dns_policies(config, tls_dns_policies):
 def load_local_config():
     """Load local config or fetch from Caddy server"""
     # Always try to fetch current config from Caddy first to preserve routes from all agents
-    target_url = get_target_caddy_url()
+    target_url = CADDY_URL
     try:
         headers = {}
         if CADDY_API_TOKEN:
@@ -868,16 +911,16 @@ signal.signal(signal.SIGINT, shutdown_handler)
 if __name__ == "__main__":
     logger.info("="*60)
     logger.info("🚀 Caddy Docker Agent Starting")
-    logger.info(f"   Mode: {AGENT_MODE}")
     logger.info(f"   Agent ID: {AGENT_ID}")
+    logger.info(f"   Caddy URL: {CADDY_URL}")
     logger.info(f"   Docker Label Prefix: {DOCKER_LABEL_PREFIX}")
 
-    if AGENT_MODE == "agent":
-        logger.info(f"   Target Server: {CADDY_SERVER_URL}")
-        host_ip = HOST_IP or detect_host_ip()
-        logger.info(f"   Host IP: {host_ip}")
+    # Compute and log effective host IP
+    effective_ip = get_effective_host_ip()
+    if effective_ip:
+        logger.info(f"   Mode: REMOTE (upstreams use {effective_ip})")
     else:
-        logger.info(f"   Caddy API: {CADDY_API_URL}")
+        logger.info(f"   Mode: LOCAL (upstreams use container names)")
 
     if CADDY_API_TOKEN:
         logger.info(f"   Authentication: Enabled (token configured)")
