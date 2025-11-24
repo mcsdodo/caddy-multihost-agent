@@ -63,6 +63,26 @@ cleanup_host() {
         echo -e "${GREEN}  No volumes to prune${NC}"
     fi
 
+    # Clean up unused images (dangling and unreferenced)
+    echo "  Pruning unused images..."
+    local image_output=$(ssh "${host_ssh}" "docker image prune -af 2>&1")
+    if echo "$image_output" | grep -q "Total reclaimed space:"; then
+        local image_reclaimed=$(echo "$image_output" | grep "Total reclaimed space:" | awk '{print $4, $5}')
+        echo -e "${GREEN}  ✓ Images pruned (reclaimed: ${image_reclaimed})${NC}"
+    else
+        echo -e "${GREEN}  No images to prune${NC}"
+    fi
+
+    # Clean up build cache
+    echo "  Pruning build cache..."
+    local build_output=$(ssh "${host_ssh}" "docker builder prune -af 2>&1")
+    if echo "$build_output" | grep -q "Total:"; then
+        local build_reclaimed=$(echo "$build_output" | grep "Total:" | awk '{print $2}')
+        echo -e "${GREEN}  ✓ Build cache pruned (reclaimed: ${build_reclaimed})${NC}"
+    else
+        echo -e "${GREEN}  No build cache to prune${NC}"
+    fi
+
     # Verify cleanup
     echo "  Verifying cleanup..."
     local remaining=$(ssh "${host_ssh}" "docker ps -aq | wc -l")
