@@ -830,13 +830,13 @@ def push_to_caddy(routes, global_settings=None, tls_dns_policies=None):
         host_ip = get_effective_host_ip()
         mode_desc = f"remote (HOST_IP={host_ip})" if host_ip else "local"
         logger.info(f"Pushing config to {target_url} [Mode: {mode_desc}]")
-        logger.debug(f"Full config being pushed:\n{json.dumps(config, indent=2)}")
+        logger.debug(f"Full config being pushed: {json.dumps(config)}")
         response = requests.post(f"{target_url}/load", json=config, headers=headers)
         if response.status_code == 200:
             logger.info(f"✅ Caddy config updated successfully [Agent: {AGENT_ID}]")
         else:
             logger.error(f"❌ Caddy update failed: {response.status_code} - {response.text}")
-            logger.debug(f"Failed config:\n{json.dumps(config, indent=2)}")
+            logger.debug(f"Failed config: {json.dumps(config)}")
     except Exception as e:
         logger.error(f"❌ Error pushing to Caddy: {e}")
 
