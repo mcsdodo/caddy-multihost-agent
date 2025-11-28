@@ -18,6 +18,10 @@ CADDY_API_TOKEN = os.getenv("CADDY_API_TOKEN", "")
 DOCKER_LABEL_PREFIX = os.getenv("DOCKER_LABEL_PREFIX", "caddy")
 AGENT_FILTER_LABEL = os.getenv("AGENT_FILTER_LABEL", None)
 
+# Recovery mechanism configuration
+HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "5"))    # seconds, 0 to disable
+RESYNC_INTERVAL = int(os.getenv("RESYNC_INTERVAL", "300"))              # seconds, 0 to disable
+
 # Cached effective host IP (computed once at startup)
 _effective_host_ip = None
 
@@ -958,6 +962,117 @@ def sync_config():
     routes, global_settings, tls_dns_policies = get_caddy_routes()
     push_to_caddy(routes, global_settings, tls_dns_policies)
 
+# =============================================================================
+# Route Recovery Mechanism
+# Handles Caddy restarts by periodically checking if routes are present
+# =============================================================================
+
+# Shared state for recovery threads
+last_sync_time = 0
+sync_lock = threading.Lock()
+
+def get_our_route_count():
+    """Get count of our routes currently in Caddy"""
+    try:
+        headers = {}
+        if CADDY_API_TOKEN:
+            headers["Authorization"] = f"Bearer {CADDY_API_TOKEN}"
+
+        count = 0
+        # Check all servers for our routes
+        response = requests.get(f"{CADDY_URL}/config/apps/http/servers", headers=headers, timeout=5)
+        if response.ok:
+            servers = response.json() or {}
+            for server_name, server_config in servers.items():
+                routes = server_config.get("routes", [])
+                count += len([r for r in routes if r.get("@id", "").startswith(f"{AGENT_ID}_")])
+        return count
+    except Exception as e:
+        logger.debug(f"Error getting route count: {e}")
+        return -1  # Error state
+
+def get_expected_route_count():
+    """Get count of routes we should have (from local Docker containers)"""
+    try:
+        routes, _, _ = get_caddy_routes()
+        return len(routes)
+    except Exception as e:
+        logger.debug(f"Error getting expected route count: {e}")
+        return 0
+
+def routes_need_sync():
+    """Check if our routes are missing or incomplete.
+    Returns: True if sync needed, False if OK, None if can't determine (API error)
+    """
+    current = get_our_route_count()
+    if current == -1:
+        return None  # Can't determine, API error
+    expected = get_expected_route_count()
+    return current < expected
+
+def safe_sync():
+    """Thread-safe sync with deduplication"""
+    global last_sync_time
+    with sync_lock:
+        # Debounce: don't sync more than once per 5 seconds
+        now = time.time()
+        if now - last_sync_time < 5:
+            logger.debug("Sync skipped (debounce)")
+            return False
+        last_sync_time = now
+        sync_config()  # Must be inside lock to prevent concurrent syncs
+    return True
+
+def health_check_loop():
+    """Fast detection: check if our routes are present every few seconds"""
+    time.sleep(10)  # Startup delay: let initial sync settle before checking
+    consecutive_failures = 0
+
+    while True:
+        # Exponential backoff on repeated failures (max 30s)
+        interval = min(HEALTH_CHECK_INTERVAL * (2 ** consecutive_failures), 30)
+        time.sleep(interval)
+
+        need_sync = routes_need_sync()
+        if need_sync is None:
+            consecutive_failures += 1
+            logger.warning("🏥 Health check: Caddy API unreachable")
+            continue
+
+        consecutive_failures = 0  # Reset on success
+        if need_sync:
+            logger.info("🏥 Routes missing, resyncing...")
+            safe_sync()
+
+def periodic_resync_loop():
+    """Fallback: force resync periodically regardless of state"""
+    while True:
+        time.sleep(RESYNC_INTERVAL)
+
+        need_sync = routes_need_sync()
+        if need_sync is None:
+            logger.info("⏰ Periodic check: API unreachable, forcing sync...")
+            safe_sync()
+        elif need_sync:
+            logger.info("⏰ Periodic check: routes missing, resyncing...")
+            safe_sync()
+        else:
+            logger.debug("⏰ Periodic check: routes OK")
+
+def start_recovery_threads():
+    """Start both recovery mechanisms"""
+    if HEALTH_CHECK_INTERVAL > 0:
+        health_thread = threading.Thread(target=health_check_loop, daemon=True, name="health-check")
+        health_thread.start()
+        logger.info(f"🏥 Health check enabled: every {HEALTH_CHECK_INTERVAL}s")
+
+    if RESYNC_INTERVAL > 0:
+        resync_thread = threading.Thread(target=periodic_resync_loop, daemon=True, name="periodic-resync")
+        resync_thread.start()
+        logger.info(f"⏰ Periodic resync enabled: every {RESYNC_INTERVAL}s")
+
+# =============================================================================
+
 last_update = 0
 debounce_seconds = 5  # Increased debounce to 5 seconds
 
@@ -1002,7 +1117,11 @@ if __name__ == "__main__":
     if AGENT_FILTER_LABEL:
         logger.info(f"   Container Filter: {AGENT_FILTER_LABEL}")
 
+    logger.info(f"   Health Check: {HEALTH_CHECK_INTERVAL}s (0=disabled)")
+    logger.info(f"   Periodic Resync: {RESYNC_INTERVAL}s (0=disabled)")
+
     logger.info("="*60)
 
     sync_config()  # Initial sync
+    start_recovery_threads()  # Start health check and periodic resync
     watch_docker_events()

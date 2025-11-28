@@ -10,6 +10,9 @@ services:
       - AGENT_ID=host2-remote
       - DOCKER_LABEL_PREFIX=caddy
       # HOST_IP not set - will auto-detect with network_mode: host
+      # Recovery mechanism (handles Caddy restarts)
+      - HEALTH_CHECK_INTERVAL=5   # Fast detection of missing routes
+      - RESYNC_INTERVAL=300       # Fallback periodic resync (5 min)
     network_mode: host
 
   # Test service - simple label (backward compatibility)

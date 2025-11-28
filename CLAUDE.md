@@ -65,6 +65,36 @@ Test domains use `*.server.lan` pattern (e.g., `test.server.lan`).
 - `caddy-agent-watch.py` - Watches Docker events, pushes routes to server
 - Connects to `http://192.168.0.96:2020` (not 2019!)
 
+### Route Recovery Mechanism
+
+Agents automatically recover routes after Caddy restarts using two mechanisms:
+
+| Mechanism | Interval | Purpose |
+|-----------|----------|---------|
+| Health check | 5s | Fast detection of missing routes |
+| Periodic resync | 300s | Fallback for network issues |
+
+**Environment Variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HEALTH_CHECK_INTERVAL` | `5` | Seconds between health checks. `0` to disable. |
+| `RESYNC_INTERVAL` | `300` | Seconds between periodic resyncs. `0` to disable. |
+
+**How it works:**
+1. Health check runs every 5s, compares route count in Caddy vs expected from Docker
+2. If routes missing, triggers resync within ~15s (10s startup delay + 5s check)
+3. Exponential backoff (5s → 10s → 20s → 30s max) when Caddy API unreachable
+4. Periodic resync runs every 5 minutes as fallback
+
+**Test recovery:**
+```bash
+# Restart Caddy and observe recovery
+ssh root@192.168.0.96 "docker restart caddy-server"
+sleep 20
+curl -sk --resolve test-remote.lan:443:192.168.0.96 https://test-remote.lan
+```
+
 ## Docker Compose Files
 
 - `docker-compose-prod-server.yml` - Caddy with caddy-docker-proxy + global config

@@ -10,6 +10,9 @@ services:
       - AGENT_ID=host3-remote
       - HOST_IP=192.168.0.99
       - DOCKER_LABEL_PREFIX=caddy
+      # Recovery mechanism (handles Caddy restarts)
+      - HEALTH_CHECK_INTERVAL=5   # Fast detection of missing routes
+      - RESYNC_INTERVAL=300       # Fallback periodic resync (5 min)
     # Bridge network with explicit HOST_IP - tests non-auto-detect code path
 
   # Test service - simple label (backward compatibility)
