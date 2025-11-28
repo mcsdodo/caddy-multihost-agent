@@ -96,6 +96,43 @@ sleep 20
 curl -sk --resolve test-remote.lan:443:192.168.0.96 https://test-remote.lan
 ```
 
+### Snippet Sharing API
+
+Share snippet definitions between hosts via HTTP API.
+
+**Environment Variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SNIPPET_API_PORT` | `0` | Port to serve snippets API. `0` = disabled. |
+| `SNIPPET_SOURCES` | `` | Comma-separated URLs to fetch snippets from |
+| `SNIPPET_CACHE_TTL` | `300` | Cache duration in seconds (5 min default) |
+
+**Usage:**
+
+Host1 (serves snippets):
+```yaml
+caddy-agent:
+  environment:
+    - SNIPPET_API_PORT=8567
+```
+
+Host2/Host3 (fetches snippets):
+```yaml
+caddy-agent:
+  environment:
+    - SNIPPET_SOURCES=http://192.168.0.96:8567
+```
+
+**API Endpoint:**
+
+`GET /snippets` - Returns all discovered snippets as JSON.
+
+**Test snippet API:**
+```bash
+curl -s http://192.168.0.96:8567/snippets | python -m json.tool
+```
+
 ## Docker Compose Files
 
 - `docker-compose-prod-server.yml` - Caddy with caddy-docker-proxy + global config
