@@ -8,7 +8,7 @@ import signal
 import sys
 import time
 import socket
-from copy import deepcopy
+import copy
 
 # Configuration - Simplified model
 CADDY_URL = os.getenv("CADDY_URL", "http://localhost:2019")
@@ -240,13 +240,8 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
 
         if not directive:
             # Base label: caddy or caddy_N
-            # Check for http:// prefix (HTTP-only route)
-            if label_value.startswith('http://'):
-                route_configs[route_num]['domain'] = label_value[7:]  # Remove 'http://'
-                route_configs[route_num]['http_only'] = True
-            else:
-                route_configs[route_num]['domain'] = label_value
-                route_configs[route_num]['http_only'] = False
+            # Keep raw value - http:// prefix handling done per-domain later
+            route_configs[route_num]['domain'] = label_value
         else:
             # Directive label: caddy.reverse_proxy or caddy_N.reverse_proxy
             route_configs[route_num][directive] = label_value
@@ -256,8 +251,7 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
     tls_dns_policies = []  # Collect TLS DNS policies for automation
     for route_num, config in sorted(route_configs.items()):
         domain = config.get('domain')
-        http_only = config.get('http_only', False)
-        logger.info(f"Processing route {route_num}: domain={domain}, http_only={http_only}, config_keys={list(config.keys())}")
+        logger.info(f"Processing route {route_num}: domain={domain}, config_keys={list(config.keys())}")
 
         # Skip snippets and global settings (no domain or snippet pattern)
         if not domain or (domain.startswith('(') and domain.endswith(')')):
@@ -287,15 +281,22 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
         if not proxy_target:
             continue
 
-        # Parse multiple domains (comma-separated)
-        domains = [d.strip() for d in domain.split(',')]
+        # Parse multiple domains (comma-separated) and check each for http:// prefix
+        raw_domains = [d.strip() for d in domain.split(',')]
+        http_only_domains = []
+        https_domains = []
+        for d in raw_domains:
+            if d.startswith('http://'):
+                http_only_domains.append(d[7:])  # Strip http:// prefix
+            else:
+                https_domains.append(d)
 
-        logger.info(f"Route: domain(s) {domains} will use upstream '{proxy_target}'")
+        logger.info(f"Route: http_only_domains={http_only_domains}, https_domains={https_domains}, upstream='{proxy_target}'")
 
         # Build route with agent metadata
-        route_id = f"{AGENT_ID}_{container.name}"
+        base_route_id = f"{AGENT_ID}_{container.name}"
         if route_num != "0":
-            route_id += f"_{route_num}"
+            base_route_id += f"_{route_num}"
 
         # Build handle section with reverse_proxy
         handle = [{
@@ -322,26 +323,37 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
             # Insert handle directives before reverse_proxy
             handle = handle_directives + handle
 
-        route = {
-            "@id": route_id,
-            "handle": handle,
-            "match": [{
-                "host": domains
-            }],
-            "_http_only": http_only  # Internal flag for server selection (stripped before push)
-        }
+        # Create separate routes for HTTP-only and HTTPS domains
+        # This allows mixed labels like: http://foo.lan, bar.lacny.me
 
-        # Add TLS config if present (for wildcard certificates, etc.)
-        if tls_config:
-            # Create TLS automation policy for this domain
-            tls_policy = {
-                "subjects": domains,  # Apply to these specific domains
-                "tls_config": tls_config
+        if http_only_domains:
+            route_id = base_route_id if not https_domains else f"{base_route_id}_http"
+            route = {
+                "@id": route_id,
+                "handle": copy.deepcopy(handle),
+                "match": [{"host": http_only_domains}],
+                "_http_only": True
             }
-            tls_dns_policies.append(tls_policy)
-            logger.info(f"TLS DNS policy created for domains: {domains}")
+            routes.append(route)
 
-        routes.append(route)
+        if https_domains:
+            route_id = base_route_id if not http_only_domains else f"{base_route_id}_https"
+            route = {
+                "@id": route_id,
+                "handle": copy.deepcopy(handle),
+                "match": [{"host": https_domains}],
+                "_http_only": False
+            }
+            routes.append(route)
+
+            # Add TLS config if present (only for HTTPS domains)
+            if tls_config:
+                tls_policy = {
+                    "subjects": https_domains,
+                    "tls_config": tls_config
+                }
+                tls_dns_policies.append(tls_policy)
+                logger.info(f"TLS DNS policy created for domains: {https_domains}")
 
     return routes, tls_dns_policies
 
@@ -516,7 +528,8 @@ def resolve_upstreams(container, proxy_target, domain, host_ip):
     """Resolve {{upstreams PORT}} template to actual upstream address"""
     import re
 
-    upstreams_match = re.match(r"\{\{upstreams (\d+)}}", proxy_target.strip())
+    # Handle both {{upstreams PORT}} and {{ upstreams PORT }} (with optional spaces)
+    upstreams_match = re.match(r"\{\{\s*upstreams\s+(\d+)\s*}}", proxy_target.strip())
     if not upstreams_match:
         return proxy_target  # Already resolved or static address
 
