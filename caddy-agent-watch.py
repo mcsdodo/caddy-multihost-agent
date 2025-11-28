@@ -159,9 +159,15 @@ def get_caddy_routes():
         global_settings.update(container_globals)
         snippets.update(container_snippets)
 
+    # Merge remote snippets (fetched on-demand, cached)
+    remote_snippets = fetch_remote_snippets()
+    if remote_snippets:
+        snippets.update(remote_snippets)
+        logger.info(f"Merged {len(remote_snippets)} remote snippet(s)")
+
     # Log discovered snippets
     if snippets:
-        logger.info(f"Discovered {len(snippets)} snippet(s): {list(snippets.keys())}")
+        logger.info(f"Total snippets available: {len(snippets)} - {list(snippets.keys())}")
     if global_settings:
         logger.info(f"Global settings: {list(global_settings.keys())}")
 
@@ -252,6 +258,39 @@ def parse_globals_and_snippets_from_all_containers():
         snippets.update(container_snippets)
 
     return global_settings, snippets
+
+def fetch_remote_snippets():
+    """Fetch snippets from remote sources (with caching)"""
+    global _snippet_cache, _snippet_cache_time
+
+    if not SNIPPET_SOURCES:
+        return {}
+
+    # Return cached if still valid
+    if time.time() - _snippet_cache_time < SNIPPET_CACHE_TTL:
+        logger.debug(f"Using cached snippets ({len(_snippet_cache)} snippets)")
+        return _snippet_cache
+
+    for source in SNIPPET_SOURCES.split(","):
+        source = source.strip()
+        if not source:
+            continue
+        try:
+            response = requests.get(f"{source}/snippets", timeout=5)
+            if response.ok:
+                _snippet_cache = response.json()
+                _snippet_cache_time = time.time()
+                logger.info(f"Fetched {len(_snippet_cache)} snippets from {source}")
+                return _snippet_cache
+            else:
+                logger.warning(f"Failed to fetch snippets from {source}: HTTP {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch snippets from {source}: {e}")
+
+    # Return stale cache on failure
+    if _snippet_cache:
+        logger.warning(f"Using stale snippet cache ({len(_snippet_cache)} snippets)")
+    return _snippet_cache
 
 def parse_container_labels(container, labels, host_ip, snippets=None):
     """Parse container labels to extract route configurations.
