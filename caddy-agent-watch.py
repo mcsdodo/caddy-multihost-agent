@@ -416,7 +416,7 @@ def parse_transport_config(config):
             directive = key[10:]  # Remove 'transport.' prefix
 
             if 'transport' not in transport_config:
-                transport_config['transport'] = {}
+                transport_config['transport'] = {'protocol': 'http'}
 
             if directive == 'tls':
                 # Enable TLS for backend

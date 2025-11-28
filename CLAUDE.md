@@ -80,6 +80,7 @@ Agents automatically recover routes after Caddy restarts using two mechanisms:
 |----------|---------|-------------|
 | `HEALTH_CHECK_INTERVAL` | `5` | Seconds between health checks. `0` to disable. |
 | `RESYNC_INTERVAL` | `300` | Seconds between periodic resyncs. `0` to disable. |
+| `LOG_LEVEL` | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`. Use `DEBUG` to see full config pushes. |
 
 **How it works:**
 1. Health check runs every 5s, compares route count in Caddy vs expected from Docker
