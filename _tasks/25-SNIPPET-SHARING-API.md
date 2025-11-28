@@ -57,14 +57,31 @@ Returns all discovered snippets as JSON:
 {
   "wildcard": {
     "tls.dns": "cloudflare ${CF_API_TOKEN}",
-    "tls.resolvers": "1.1.1.1 1.0.0.1"
+    "tls.resolvers": "1.1.1.1 1.0.0.1",
+    "handle.abort": ""
+  },
+  "internal": {
+    "tls": "internal"
   },
   "https": {
     "transport": "http",
-    "transport.tls": ""
+    "transport.tls": "",
+    "transport.tls_insecure_skip_verify": ""
   }
 }
 ```
+
+### Snippet Compatibility
+
+**Important:** Not all snippets are safe to import with `reverse_proxy`:
+
+| Snippet | Safe to import? | Reason |
+|---------|-----------------|--------|
+| `internal` | ✅ Yes | Only sets TLS cert type |
+| `wildcard` | ❌ No | Has `handle.abort` - terminates request before proxy |
+| `https` | ⚠️ Depends | Has `transport.tls` - requires HTTPS backend |
+
+**Pattern from production:** Snippets like `wildcard` are imported by wildcard domain declarations (`*.lacny.me`) to configure TLS. Individual services should NOT import these snippets - they just declare their domain and Caddy uses the already-configured wildcard cert.
 
 ### Implementation
 
@@ -158,10 +175,9 @@ def get_caddy_routes():
 **Host1 (serves snippets):**
 ```yaml
 caddy-agent:
+  network_mode: host  # Port automatically exposed, no mapping needed
   environment:
     - SNIPPET_API_PORT=8567
-  ports:
-    - "8567:8567"  # Internal network only
 ```
 
 **Host2/Host3 (fetches snippets):**
@@ -171,7 +187,7 @@ caddy-agent:
     - SNIPPET_SOURCES=http://192.168.0.96:8567
 ```
 
-Now `caddy.import: wildcard, https` works on remote hosts!
+Now remote agents can fetch and use snippets defined on host1. Use `caddy.import: internal` for safe snippet imports with `reverse_proxy`.
 
 ### Error Handling
 
@@ -260,5 +276,6 @@ class SnippetAPITests:
    - Include in default test run
 
 6. **`docker-compose-prod-agent2.yml`**
-   - Add test container with `caddy.import: wildcard` (fetched remotely)
+   - Add test container with `caddy.import: internal` (fetched remotely)
    - Domain: `remote-snippet-test.lan`
+   - Note: Uses `internal` not `wildcard` (wildcard has handle.abort)

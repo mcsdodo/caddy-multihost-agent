@@ -157,6 +157,85 @@ environment:
   - DOCKER_SOCK=unix:///run/docker.sock  # Absolute path
 ```
 
+### Snippet Sharing API
+
+Share snippet definitions between hosts via HTTP API. Enables remote agents to fetch snippets defined on the central Caddy server host.
+
+#### `SNIPPET_API_PORT` (optional)
+
+Port to serve the snippet API on. Set to enable snippet sharing.
+
+**Default**: `0` (disabled)
+**Example**:
+```yaml
+environment:
+  # Enable snippet API on port 8567
+  - SNIPPET_API_PORT=8567
+```
+
+When enabled with `network_mode: host`, the port is automatically exposed.
+
+#### `SNIPPET_SOURCES` (optional)
+
+Comma-separated URLs to fetch snippets from.
+
+**Default**: Empty (no remote snippets)
+**Example**:
+```yaml
+environment:
+  # Fetch snippets from central server
+  - SNIPPET_SOURCES=http://192.168.0.96:8567
+
+  # Multiple sources (fallback)
+  - SNIPPET_SOURCES=http://192.168.0.96:8567,http://192.168.0.97:8567
+```
+
+#### `SNIPPET_CACHE_TTL` (optional)
+
+How long to cache fetched snippets (in seconds).
+
+**Default**: `300` (5 minutes)
+**Example**:
+```yaml
+environment:
+  - SNIPPET_CACHE_TTL=300  # 5 minutes
+  - SNIPPET_CACHE_TTL=60   # 1 minute (more frequent updates)
+```
+
+#### Snippet Compatibility
+
+**Important:** Not all snippets are safe to import with `reverse_proxy`:
+
+| Snippet | Safe to import? | Reason |
+|---------|-----------------|--------|
+| `internal` | ✅ Yes | Only sets TLS cert type |
+| `wildcard` | ❌ No | Has `handle.abort` - terminates request |
+| `https` | ⚠️ Depends | Forces TLS to backend (needs HTTPS backend) |
+
+**Pattern:** Wildcard domains (`*.lacny.me`) import `wildcard` to configure TLS. Individual services should NOT import `wildcard` - just declare their domain and the wildcard cert is used automatically.
+
+#### Example Setup
+
+**Host1 (serves snippets):**
+```yaml
+caddy-agent:
+  network_mode: host
+  environment:
+    - SNIPPET_API_PORT=8567
+```
+
+**Host2 (fetches snippets):**
+```yaml
+caddy-agent:
+  environment:
+    - SNIPPET_SOURCES=http://192.168.0.96:8567
+```
+
+**Test snippet API:**
+```bash
+curl -s http://192.168.0.96:8567/snippets | python -m json.tool
+```
+
 ## Docker Labels
 
 Container labels define routes and reverse proxy targets. Format:

@@ -133,6 +133,16 @@ caddy-agent:
 curl -s http://192.168.0.96:8567/snippets | python -m json.tool
 ```
 
+**Snippet Compatibility:**
+
+| Snippet | Safe with reverse_proxy? | Reason |
+|---------|-------------------------|--------|
+| `internal` | ✅ Yes | Only sets TLS cert type |
+| `wildcard` | ❌ No | Has `handle.abort` - terminates request |
+| `https` | ⚠️ Depends | Forces TLS to backend |
+
+**Note:** Wildcard domains (`*.lacny.me`) import `wildcard` to set up TLS certs. Individual services should NOT import `wildcard` - just declare their domain and the cert is used automatically.
+
 ## Docker Compose Files
 
 - `docker-compose-prod-server.yml` - Caddy with caddy-docker-proxy + global config
