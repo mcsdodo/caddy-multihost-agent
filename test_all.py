@@ -13,6 +13,7 @@ import os
 import sys
 import subprocess
 import argparse
+import json
 
 # Configuration
 CADDY_SERVER = "192.168.0.96"
@@ -517,6 +518,94 @@ class ServerModeTests:
 
 
 # =============================================================================
+# SNIPPET API TESTS
+# =============================================================================
+
+class SnippetAPITests:
+    """Tests for Snippet Sharing API"""
+
+    @staticmethod
+    def test_snippet_api_accessible():
+        """Test: Snippet API is accessible on host1"""
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "5", f"http://{CADDY_SERVER}:8567/snippets"],
+                capture_output=True, text=True, timeout=7
+            )
+            assert result.returncode == 0 and result.stdout, f"Snippet API not accessible"
+            data = json.loads(result.stdout)
+            assert isinstance(data, dict), f"Expected JSON object, got: {type(data)}"
+            print("[PASS] test_snippet_api_accessible")
+        except json.JSONDecodeError as e:
+            raise AssertionError(f"Invalid JSON response: {e}")
+
+    @staticmethod
+    def test_snippet_api_returns_snippets():
+        """Test: Snippet API returns expected snippets"""
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "5", f"http://{CADDY_SERVER}:8567/snippets"],
+                capture_output=True, text=True, timeout=7
+            )
+            data = json.loads(result.stdout)
+            # Host1 should have at least 'wildcard' and 'internal' snippets
+            assert len(data) > 0, f"No snippets returned"
+            print(f"[PASS] test_snippet_api_returns_snippets ({len(data)} snippets: {list(data.keys())})")
+        except json.JSONDecodeError as e:
+            raise AssertionError(f"Invalid JSON response: {e}")
+
+    @staticmethod
+    def test_remote_snippet_import():
+        """Test: Remote agent can use snippet fetched from host1"""
+        result = IntegrationTests.run_curl("remote-snippet-test.lan", port=443, https=True)
+        assert result and "remote" in result.lower(), f"Expected remote-snippet response, got: {result}"
+        print("[PASS] test_remote_snippet_import")
+
+    @staticmethod
+    def run_all():
+        """Run all snippet API tests"""
+        print("=" * 60)
+        print("SNIPPET API TESTS")
+        print("=" * 60)
+
+        # First check if snippet API is accessible
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "3", f"http://{CADDY_SERVER}:8567/snippets"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0 or not result.stdout:
+                print(f"[SKIP] Snippet API not accessible at {CADDY_SERVER}:8567")
+                print("       Make sure caddy-agent-server has SNIPPET_API_PORT=8567")
+                return False
+        except Exception:
+            print(f"[SKIP] Snippet API not accessible at {CADDY_SERVER}:8567")
+            return False
+
+        tests = [
+            SnippetAPITests.test_snippet_api_accessible,
+            SnippetAPITests.test_snippet_api_returns_snippets,
+            SnippetAPITests.test_remote_snippet_import,
+        ]
+
+        passed = 0
+        failed = 0
+        for test in tests:
+            try:
+                test()
+                passed += 1
+            except AssertionError as e:
+                print(f"[FAIL] {test.__name__}: {e}")
+                failed += 1
+            except Exception as e:
+                print(f"[ERROR] {test.__name__}: {e}")
+                failed += 1
+
+        print(f"\nPassed: {passed}/{len(tests)}")
+        return failed == 0
+
+
+# =============================================================================
 # CONFIGURATION TESTS
 # =============================================================================
 
@@ -572,14 +661,16 @@ def main():
     parser.add_argument("--integration", action="store_true", help="Run integration tests only")
     parser.add_argument("--server-mode", action="store_true", help="Run server mode tests only")
     parser.add_argument("--config", action="store_true", help="Run config tests only")
+    parser.add_argument("--snippet-api", action="store_true", help="Run snippet API tests only")
     args = parser.parse_args()
 
     # Default: run all
-    any_specific = args.unit or args.integration or args.server_mode or args.config
+    any_specific = args.unit or args.integration or args.server_mode or args.config or args.snippet_api
     run_unit = args.unit or not any_specific
     run_integration = args.integration or not any_specific
     run_server_mode = args.server_mode or not any_specific
     run_config = args.config or not any_specific
+    run_snippet_api = args.snippet_api or not any_specific
 
     results = []
 
@@ -601,6 +692,10 @@ def main():
 
     if run_server_mode:
         results.append(("Server Mode Tests", ServerModeTests.run_all()))
+        print()
+
+    if run_snippet_api:
+        results.append(("Snippet API Tests", SnippetAPITests.run_all()))
         print()
 
     # Summary
