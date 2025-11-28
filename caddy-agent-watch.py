@@ -30,6 +30,9 @@ SNIPPET_API_PORT = int(os.getenv("SNIPPET_API_PORT", "0"))  # 0 = disabled
 SNIPPET_SOURCES = os.getenv("SNIPPET_SOURCES", "")  # Comma-separated URLs
 SNIPPET_CACHE_TTL = int(os.getenv("SNIPPET_CACHE_TTL", "300"))  # 5 minutes
 
+# Config push control - set to "false" to disable pushing config to Caddy (snippet-only mode)
+CONFIG_PUSH_ENABLED = os.getenv("CONFIG_PUSH_ENABLED", "true").lower() != "false"
+
 # Cached effective host IP (computed once at startup)
 _effective_host_ip = None
 
@@ -1273,6 +1276,8 @@ def watch_docker_events():
         if event.get("Type") == "container":
             action = event.get("Action")
             if action in ["start", "stop", "die", "destroy"]:
+                if not CONFIG_PUSH_ENABLED:
+                    continue  # Skip sync in snippet-only mode
                 global last_update
                 now = time.time()
                 if now - last_update > debounce_seconds:
@@ -1314,11 +1319,15 @@ if __name__ == "__main__":
     logger.info(f"   Snippet API Port: {SNIPPET_API_PORT} (0=disabled)")
     if SNIPPET_SOURCES:
         logger.info(f"   Snippet Sources: {SNIPPET_SOURCES}")
+    logger.info(f"   Config Push: {'Enabled' if CONFIG_PUSH_ENABLED else 'Disabled (snippet-only mode)'}")
 
     logger.info("="*60)
 
-    sync_config()  # Initial sync
-    start_recovery_threads()  # Start health check and periodic resync
+    if CONFIG_PUSH_ENABLED:
+        sync_config()  # Initial sync
+        start_recovery_threads()  # Start health check and periodic resync
+    else:
+        logger.info("📋 Config push disabled (snippet-only mode)")
 
     # Start snippet API server (if enabled)
     if SNIPPET_API_PORT > 0:
