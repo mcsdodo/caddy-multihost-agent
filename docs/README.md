@@ -393,16 +393,6 @@ MIT License - See LICENSE file for details
 - **Documentation**: See [docs/](docs/) directory
 - **Test Results**: See [06-TEST-RUN-*.md](06-TEST-RUN-2025-11-16.md) for latest test run
 
-## Roadmap
-
-- [ ] Persistent configuration storage
-- [ ] Agent heartbeat/TTL mechanism for stale route cleanup
-- [ ] Prometheus metrics export
-- [ ] Support for multiple Caddy instances
-- [ ] Automatic failover/backup server support
-- [ ] Web UI for route management
-- [ ] Kubernetes operator
-
 ## FAQ
 
 **Q: Can I use this without Docker?**
