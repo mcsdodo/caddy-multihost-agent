@@ -58,30 +58,41 @@ Containers  Containers
 
 ## Deployment
 
-### Build Images
-```bash
-# Build Caddy with docker-proxy + cloudflare DNS
-docker build -f Dockerfile.Caddy -t caddy-docker-proxy:latest .
-docker save caddy-docker-proxy:latest | gzip > caddy-docker-proxy.tar.gz
+### Using Scripts (Recommended)
 
-# Build agent
-docker build -t caddy-agent:latest .
-docker save caddy-agent:latest | gzip > caddy-agent.tar.gz
+```bash
+# Build and deploy all hosts
+./deploy-hosts.sh --build
+
+# Deploy single host
+./deploy-hosts.sh host1 --build
+
+# Deploy without starting containers
+./deploy-hosts.sh --build --no-start
+
+# Cleanup all hosts
+./cleanup-hosts.sh
+
+# Cleanup with volume pruning
+./cleanup-hosts.sh --volumes
 ```
 
-### Deploy to Hosts
+### Manual Deployment
+
 ```bash
-# host1 - Server
-scp caddy-docker-proxy.tar.gz docker-compose-prod-server.yml Dockerfile.Caddy root@192.168.0.96:/root/caddy-multihost/
+# Build images
+docker build -f Dockerfile.Caddy -t caddy-docker-proxy:latest .
+docker save caddy-docker-proxy:latest | gzip > caddy-docker-proxy.tar.gz
+docker build -t caddy-agent:latest .
+docker save caddy-agent:latest | gzip > caddy-agent.tar.gz
+
+# Deploy host1 (server)
+scp caddy-docker-proxy.tar.gz docker-compose-prod-server.yml root@192.168.0.96:/root/caddy-multihost/
 ssh root@192.168.0.96 "cd /root/caddy-multihost && gunzip -c caddy-docker-proxy.tar.gz | docker load && docker compose -f docker-compose-prod-server.yml up -d"
 
-# host2 - Agent
+# Deploy host2/host3 (agents)
 scp caddy-agent.tar.gz docker-compose-prod-agent2.yml root@192.168.0.98:/root/caddy-multihost/
 ssh root@192.168.0.98 "cd /root/caddy-multihost && gunzip -c caddy-agent.tar.gz | docker load && docker compose -f docker-compose-prod-agent2.yml up -d"
-
-# host3 - Agent
-scp caddy-agent.tar.gz docker-compose-prod-agent3.yml root@192.168.0.99:/root/caddy-multihost/
-ssh root@192.168.0.99 "cd /root/caddy-multihost && gunzip -c caddy-agent.tar.gz | docker load && docker compose -f docker-compose-prod-agent3.yml up -d"
 ```
 
 ## Testing Guide
@@ -152,7 +163,23 @@ _caddy-testing/
 ├── docker-compose-prod-server.yml # Server (caddy-docker-proxy)
 ├── docker-compose-prod-agent2.yml # Agent host2
 ├── docker-compose-prod-agent3.yml # Agent host3
+├── deploy-hosts.sh               # Deploy to test hosts
+├── cleanup-hosts.sh              # Cleanup test hosts
+├── test_all.py                   # Comprehensive test suite
 └── CLAUDE.md                      # This file
+```
+
+## Automated Testing
+
+```bash
+# Run all tests
+python test_all.py
+
+# Run unit tests only (no remote hosts needed)
+python test_all.py --unit
+
+# Run integration tests only (requires deployed hosts)
+python test_all.py --integration
 ```
 
 ## Debugging

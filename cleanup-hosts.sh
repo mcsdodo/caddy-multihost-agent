@@ -21,6 +21,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Default: don't prune volumes
+PRUNE_VOLUMES=false
+
 cleanup_host() {
     local host_name=$1
     local host_ssh=$2
@@ -53,14 +56,18 @@ cleanup_host() {
         echo -e "${GREEN}  No networks to prune${NC}"
     fi
 
-    # Clean up volumes
-    echo "  Pruning volumes..."
-    local volume_output=$(ssh "${host_ssh}" "docker volume prune -f 2>&1")
-    if echo "$volume_output" | grep -q "Total reclaimed space:"; then
-        local reclaimed=$(echo "$volume_output" | grep "Total reclaimed space:" | awk '{print $4, $5}')
-        echo -e "${GREEN}  ✓ Volumes pruned (reclaimed: ${reclaimed})${NC}"
+    # Clean up volumes (only if requested)
+    if [ "$PRUNE_VOLUMES" = true ]; then
+        echo "  Pruning volumes..."
+        local volume_output=$(ssh "${host_ssh}" "docker volume prune -f 2>&1")
+        if echo "$volume_output" | grep -q "Total reclaimed space:"; then
+            local reclaimed=$(echo "$volume_output" | grep "Total reclaimed space:" | awk '{print $4, $5}')
+            echo -e "${GREEN}  ✓ Volumes pruned (reclaimed: ${reclaimed})${NC}"
+        else
+            echo -e "${GREEN}  No volumes to prune${NC}"
+        fi
     else
-        echo -e "${GREEN}  No volumes to prune${NC}"
+        echo -e "${YELLOW}  Skipping volume prune (use --volumes to include)${NC}"
     fi
 
     # Clean up unused images (dangling and unreferenced)
@@ -96,7 +103,35 @@ cleanup_host() {
 }
 
 # Parse arguments
-TARGET="${1:-all}"
+TARGET="all"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --volumes|-v)
+            PRUNE_VOLUMES=true
+            shift
+            ;;
+        host1|host2|host3|all)
+            TARGET="$1"
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [host1|host2|host3|all] [--volumes]"
+            echo ""
+            echo "Options:"
+            echo "  host1      - Clean only host1 (192.168.0.96)"
+            echo "  host2      - Clean only host2 (192.168.0.98)"
+            echo "  host3      - Clean only host3 (192.168.0.99)"
+            echo "  all        - Clean all hosts (default)"
+            echo "  --volumes  - Also prune Docker volumes (default: no)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage"
+            exit 1
+            ;;
+    esac
+done
 
 case "$TARGET" in
     host1)
@@ -123,15 +158,5 @@ case "$TARGET" in
             echo -e "${RED}=== ${failed} host(s) failed to clean ===${NC}"
             exit 1
         fi
-        ;;
-    *)
-        echo "Usage: $0 [host1|host2|host3|all]"
-        echo ""
-        echo "Options:"
-        echo "  host1  - Clean only host1 (192.168.0.96)"
-        echo "  host2  - Clean only host2 (192.168.0.98)"
-        echo "  host3  - Clean only host3 (192.168.0.99)"
-        echo "  all    - Clean all hosts (default)"
-        exit 1
         ;;
 esac

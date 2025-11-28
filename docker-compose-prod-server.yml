@@ -41,6 +41,9 @@ services:
       caddy_12: "*.lan"
       caddy_12.import: internal
 
+      caddy_13: "*.test.lan"
+      caddy_13.import: internal
+
       # Catch-all for .lan domains (HTTP-only)
       caddy_20: http://*.lan
       caddy_20.reverse_proxy: "192.168.0.96:80"
