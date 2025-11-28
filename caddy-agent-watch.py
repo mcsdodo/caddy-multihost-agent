@@ -1136,7 +1136,7 @@ def start_recovery_threads():
 
 # =============================================================================
 
-def start_snippet_api(snippets_ref):
+def start_snippet_api():
     """Start HTTP server to serve snippets (if enabled)"""
     if SNIPPET_API_PORT <= 0:
         return
@@ -1146,22 +1146,30 @@ def start_snippet_api(snippets_ref):
     class SnippetHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == "/snippets":
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                # Get current snippets from Docker labels
-                _, current_snippets = parse_globals_and_snippets_from_all_containers()
-                self.wfile.write(json.dumps(current_snippets).encode())
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    # Get current snippets from Docker labels
+                    _, current_snippets = parse_globals_and_snippets_from_all_containers()
+                    self.wfile.write(json.dumps(current_snippets).encode())
+                except Exception as e:
+                    logger.error(f"Error serving snippets: {e}")
+                    self.send_error(500, f"Internal server error: {e}")
             else:
                 self.send_error(404)
 
         def log_message(self, format, *args):
             logger.debug(f"Snippet API: {args[0]}")
 
-    server = HTTPServer(("0.0.0.0", SNIPPET_API_PORT), SnippetHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logger.info(f"Snippet API listening on :{SNIPPET_API_PORT}")
+    try:
+        server = HTTPServer(("0.0.0.0", SNIPPET_API_PORT), SnippetHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        logger.info(f"Snippet API listening on :{SNIPPET_API_PORT}")
+    except Exception as e:
+        logger.error(f"Failed to start Snippet API server on port {SNIPPET_API_PORT}: {e}")
+        logger.info("Continuing without Snippet API server...")
 
 last_update = 0
 debounce_seconds = 5  # Increased debounce to 5 seconds
@@ -1221,6 +1229,6 @@ if __name__ == "__main__":
 
     # Start snippet API server (if enabled)
     if SNIPPET_API_PORT > 0:
-        start_snippet_api(None)
+        start_snippet_api()
 
     watch_docker_events()
