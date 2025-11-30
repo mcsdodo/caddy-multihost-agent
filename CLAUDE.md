@@ -139,9 +139,23 @@ curl -s http://192.168.0.96:8567/snippets | python -m json.tool
 |---------|-------------------------|--------|
 | `internal` | ✅ Yes | Only sets TLS cert type |
 | `wildcard` | ❌ No | Has `handle.abort` - terminates request |
-| `https` | ⚠️ Depends | Forces TLS to backend |
+| `https` | ✅ Yes | Forces TLS to backend (use for self-signed certs) |
 
 **Note:** Wildcard domains (`*.lacny.me`) import `wildcard` to set up TLS certs. Individual services should NOT import `wildcard` - just declare their domain and the cert is used automatically.
+
+**Snippet Definition Format:**
+
+When defining snippets with `reverse_proxy` subdirectives, use the `reverse_proxy.*` prefix:
+
+```yaml
+# Correct - works with caddy-agent
+caddy_2: (https)
+caddy_2.reverse_proxy.transport: http
+caddy_2.reverse_proxy.transport.tls: ""
+caddy_2.reverse_proxy.transport.tls_insecure_skip_verify: ""
+```
+
+This format ensures proper merging when imported. See `docs/CADDY-DOCKER-PROXY-BUG.md` for details on caddy-docker-proxy limitations.
 
 ## Docker Compose Files
 
@@ -262,6 +276,8 @@ _caddy-testing/
 ├── deploy-hosts.sh               # Deploy to test hosts
 ├── cleanup-hosts.sh              # Cleanup test hosts
 ├── test_all.py                   # Comprehensive test suite
+├── docs/
+│   └── CADDY-DOCKER-PROXY-BUG.md # Known caddy-docker-proxy limitations
 └── CLAUDE.md                      # This file
 ```
 
