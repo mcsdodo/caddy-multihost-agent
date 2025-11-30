@@ -528,22 +528,35 @@ def parse_tls_config(config):
 
 def parse_transport_config(config):
     """Parse transport configuration directives.
-    Supports: transport, transport.tls, transport.tls_insecure_skip_verify
+    Supports both legacy and new formats:
+    - Legacy: transport, transport.tls, transport.tls_insecure_skip_verify
+    - New: reverse_proxy.transport, reverse_proxy.transport.tls, reverse_proxy.transport.tls_insecure_skip_verify
+
+    The new format allows snippets to define transport config that properly merges
+    with route's reverse_proxy directive, matching caddy-docker-proxy behavior.
     """
     transport_config = {}
 
-    # Check if transport configuration exists
-    has_transport = any(key.startswith('transport') for key in config.keys())
+    # Check if transport configuration exists (both legacy and new prefixes)
+    has_transport = any(
+        key.startswith('transport') or key.startswith('reverse_proxy.transport')
+        for key in config.keys()
+    )
     if not has_transport:
         return transport_config
 
     for key, value in config.items():
-        if key == 'transport':
-            # transport: http
+        # Handle both legacy (transport) and new (reverse_proxy.transport) formats
+        if key == 'transport' or key == 'reverse_proxy.transport':
+            # transport: http or reverse_proxy.transport: http
             transport_config['transport'] = {'protocol': value}
 
-        elif key.startswith('transport.'):
-            directive = key[10:]  # Remove 'transport.' prefix
+        elif key.startswith('transport.') or key.startswith('reverse_proxy.transport.'):
+            # Extract directive name
+            if key.startswith('reverse_proxy.transport.'):
+                directive = key[len('reverse_proxy.transport.'):]
+            else:
+                directive = key[10:]  # Remove 'transport.' prefix
 
             if 'transport' not in transport_config:
                 transport_config['transport'] = {'protocol': 'http'}

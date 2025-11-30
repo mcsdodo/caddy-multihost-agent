@@ -25,10 +25,11 @@ services:
       caddy_1.handle.abort: ""
 
       # HTTPS backend snippet (skip TLS verify)
+      # Uses reverse_proxy.transport.* format to properly merge with route's reverse_proxy
       caddy_2: (https)
-      caddy_2.transport: http
-      caddy_2.transport.tls: ""
-      caddy_2.transport.tls_insecure_skip_verify: ""
+      caddy_2.reverse_proxy.transport: http
+      caddy_2.reverse_proxy.transport.tls: ""
+      caddy_2.reverse_proxy.transport.tls_insecure_skip_verify: ""
 
       # Setup wildcard domains
       caddy_10: "*.lacny.me"

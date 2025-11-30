@@ -562,6 +562,55 @@ class SnippetAPITests:
         print("[PASS] test_remote_snippet_import")
 
     @staticmethod
+    def test_https_snippet_import():
+        """Test: HTTPS snippet import with reverse_proxy.transport.* merging"""
+        # Uses mendhak/http-https-echo which serves HTTPS with self-signed cert
+        # The https snippet allows Caddy to connect despite the self-signed cert
+        result = IntegrationTests.run_curl("https-snippet-test.lan", port=443, https=True)
+        # http-https-echo returns JSON with request details
+        assert result and ("path" in result.lower() or "host" in result.lower()), f"Expected http-https-echo response, got: {result}"
+        print("[PASS] test_https_snippet_import")
+
+    @staticmethod
+    def test_https_snippet_route_config():
+        """Test: HTTPS snippet creates single reverse_proxy handler with transport"""
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "5", f"http://{CADDY_SERVER}:{CADDY_API_PORT}/config/apps/http/servers"],
+                capture_output=True, text=True, timeout=7
+            )
+            config = json.loads(result.stdout)
+
+            # Find the https-snippet-test.lan route
+            route_found = False
+            for srv_name, srv in config.items():
+                for route in srv.get("routes", []):
+                    match = route.get("match", [{}])
+                    if match and "https-snippet-test.lan" in match[0].get("host", []):
+                        route_found = True
+                        # Route's handle is a direct list of handlers
+                        handle = route.get("handle", [])
+                        reverse_proxy_count = sum(1 for h in handle if h.get("handler") == "reverse_proxy")
+
+                        # Should be exactly 1 reverse_proxy handler
+                        assert reverse_proxy_count == 1, f"Expected 1 reverse_proxy handler, got {reverse_proxy_count}"
+
+                        # Find the reverse_proxy handler and verify it has both upstreams and transport
+                        for h in handle:
+                            if h.get("handler") == "reverse_proxy":
+                                assert "upstreams" in h, "reverse_proxy missing upstreams"
+                                assert "transport" in h, "reverse_proxy missing transport (snippet not merged)"
+                                break
+                        break
+                if route_found:
+                    break
+
+            assert route_found, "https-snippet-test.lan route not found"
+            print("[PASS] test_https_snippet_route_config")
+        except json.JSONDecodeError as e:
+            raise AssertionError(f"Invalid JSON response: {e}")
+
+    @staticmethod
     def run_all():
         """Run all snippet API tests"""
         print("=" * 60)
@@ -586,6 +635,8 @@ class SnippetAPITests:
             SnippetAPITests.test_snippet_api_accessible,
             SnippetAPITests.test_snippet_api_returns_snippets,
             SnippetAPITests.test_remote_snippet_import,
+            SnippetAPITests.test_https_snippet_import,
+            SnippetAPITests.test_https_snippet_route_config,
         ]
 
         passed = 0

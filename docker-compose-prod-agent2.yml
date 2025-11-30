@@ -169,3 +169,19 @@ services:
       caddy: remote-snippet-test.lan
       caddy.import: internal
       caddy.reverse_proxy: "{{upstreams 9250}}"
+
+  # Test - HTTPS snippet import (validates reverse_proxy.transport.* merging)
+  # Uses 'https' snippet to connect to backend with self-signed TLS
+  # mendhak/http-https-echo serves HTTPS on port 8443 with self-signed cert
+  test-https-snippet:
+    image: mendhak/http-https-echo
+    container_name: test-https-snippet
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - HTTP_PORT=9260
+      - HTTPS_PORT=9261
+    labels:
+      caddy: https-snippet-test.lan
+      caddy.import: https
+      caddy.reverse_proxy: "{{upstreams 9261}}"
