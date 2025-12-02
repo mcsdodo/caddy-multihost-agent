@@ -1,0 +1,51 @@
+name: Caddy Agent Docker Image CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "build-flow" ]
+    paths:
+      - Dockerfile
+      - caddy-agent-watch.py
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - Dockerfile
+      - caddy-agent-watch.py
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v2.2.0
+      with:
+        username: ${{ secrets.DOCKERHUB_LOGIN }}
+        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+    - name: Docker meta
+      id: meta
+      uses: docker/metadata-action@v4.6.0
+      with:
+        # list of Docker images to use as base name for tags
+        images: |
+          mcsdodo/caddy-agent
+        # generate Docker tags based on the following events/attributes
+        flavor: |
+          latest=auto
+        tags: |
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=raw,value={{ date 'YYYYMMDD-HHmmss' }},prefix={{ sha }}-
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4.1.1
+      with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
