@@ -160,6 +160,10 @@ labels:
   caddy_0: api.example.com
   caddy_0.reverse_proxy: "{{upstreams 8080}}"
   caddy_0.reverse_proxy.header_up: "X-Real-IP {remote_host}"
+
+  # Port-based server (creates separate listener)
+  caddy: ":3000"
+  caddy.reverse_proxy: "{{upstreams 8080}}"
 ```
 
 ### Snippet Sharing
@@ -242,7 +246,10 @@ Three-host setup with Cloudflare DNS:
 ```yaml
 services:
   caddy:
+    # Option A: Use caddy-docker-proxy (recommended for single-host)
     image: lucaslorentz/caddy-docker-proxy:latest
+    # Option B: Use regular Caddy + caddy-agent (full control)
+    # image: caddy:latest  # Requires caddy-agent with CONFIG_PUSH_ENABLED=true
     network_mode: host
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

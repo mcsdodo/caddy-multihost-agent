@@ -185,3 +185,17 @@ services:
       caddy: https-snippet-test.lan
       caddy.import: https
       caddy.reverse_proxy: "{{upstreams 9261}}"
+
+  # Test - Port-based server route (e.g., :3000 -> backend)
+  # Creates a new Caddy server listening on port 3000
+  test-port-server:
+    image: hashicorp/http-echo
+    container_name: test-port-server
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -listen=:9350
+      - -text=SUCCESS - Port-based server on :3000 (host2)
+    labels:
+      caddy: ":3000"
+      caddy.reverse_proxy: "{{upstreams 9350}}"

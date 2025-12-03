@@ -420,6 +420,44 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
         if not proxy_target:
             continue
 
+        # Check for port-based server (e.g., ":2020")
+        if domain.startswith(':'):
+            port = domain[1:]  # Strip leading ':'
+            if port.isdigit():
+                logger.info(f"Port-based route detected: port={port}, upstream='{proxy_target}'")
+
+                # Build route ID for port-based server
+                route_id = f"{AGENT_ID}_{container.name}_port{port}"
+                if route_num != "0":
+                    route_id += f"_{route_num}"
+
+                # Build handle section
+                handle = [{
+                    "handler": "reverse_proxy",
+                    "upstreams": [{"dial": proxy_target}]
+                }]
+
+                # Apply transport and header config if present
+                transport_config = parse_transport_config(config)
+                header_config = parse_header_config(config)
+                if transport_config:
+                    handle[0].update(transport_config)
+                if header_config:
+                    handle[0].update(header_config)
+
+                # Add handle directives (handle.abort, etc.)
+                handle_directives = parse_handle_directives(config)
+                if handle_directives:
+                    handle = handle_directives + handle
+
+                route = {
+                    "@id": route_id,
+                    "handle": handle,
+                    "_port_server": port,  # Flag for port-based server creation
+                }
+                routes.append(route)
+                continue  # Skip normal domain processing
+
         # Parse multiple domains (comma-separated) and check each for http:// prefix
         raw_domains = [d.strip() for d in domain.split(',')]
         http_only_domains = []
@@ -764,16 +802,25 @@ def push_to_caddy(routes, global_settings=None, tls_dns_policies=None):
     if "servers" not in config["apps"]["http"]:
         config["apps"]["http"]["servers"] = {}
 
-    # Separate routes by protocol (HTTP-only vs HTTPS)
+    # Separate routes by type: port-based, HTTP-only, and HTTPS
+    port_based_routes = {}  # port -> list of routes
     http_only_routes = []
     https_routes = []
     for route in routes:
-        is_http_only = route.pop('_http_only', False)  # Remove internal flag
-        if is_http_only:
-            http_only_routes.append(route)
+        port_server = route.pop('_port_server', None)  # Remove internal flag
+        if port_server:
+            if port_server not in port_based_routes:
+                port_based_routes[port_server] = []
+            port_based_routes[port_server].append(route)
         else:
-            https_routes.append(route)
+            is_http_only = route.pop('_http_only', False)  # Remove internal flag
+            if is_http_only:
+                http_only_routes.append(route)
+            else:
+                https_routes.append(route)
 
+    if port_based_routes:
+        logger.info(f"Port-based routes: {list(port_based_routes.keys())}")
     if http_only_routes:
         logger.info(f"HTTP-only routes: {[r.get('@id') for r in http_only_routes]}")
     if https_routes:
@@ -836,6 +883,24 @@ def push_to_caddy(routes, global_settings=None, tls_dns_policies=None):
         local_routes = servers[http_server].get("routes", [])
         merged_routes = merge_routes(local_routes, http_only_routes)
         config["apps"]["http"]["servers"][http_server]["routes"] = merged_routes
+
+    # Handle port-based servers (e.g., :2020 for Admin API proxy)
+    for port, port_routes in port_based_routes.items():
+        server_name = f"srv_port_{port}"
+        if server_name not in servers:
+            # Create new server for this port
+            servers[server_name] = {
+                "listen": [f":{port}"],
+                "routes": []
+            }
+            logger.info(f"Created port-based server: {server_name} on :{port}")
+
+        # Merge routes into port-based server
+        local_routes = servers[server_name].get("routes", [])
+        merged_routes = merge_routes(local_routes, port_routes)
+        config["apps"]["http"]["servers"][server_name]["routes"] = merged_routes
+        logger.info(f"Port-based server {server_name}: {len(merged_routes)} route(s)")
+
     # Save updated config
     save_local_config(config)
 

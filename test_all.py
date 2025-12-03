@@ -160,6 +160,29 @@ class UnitTests:
         print("[PASS] test_global_settings")
 
     @staticmethod
+    def test_port_based_route():
+        """Test: Port-based routes (e.g., :2020)"""
+        labels = {
+            "caddy": ":3000",
+            "caddy.reverse_proxy": "localhost:8080",
+        }
+        routes = parse_labels_test(labels)
+        assert routes["0"]["domain"] == ":3000"
+        assert routes["0"]["reverse_proxy"] == "localhost:8080"
+        print("[PASS] test_port_based_route")
+
+    @staticmethod
+    def test_port_based_numbered():
+        """Test: Port-based routes with numbered labels"""
+        labels = {
+            "caddy_20": ":2020",
+            "caddy_20.reverse_proxy": "localhost:2019",
+        }
+        routes = parse_labels_test(labels)
+        assert routes["20"]["domain"] == ":2020"
+        print("[PASS] test_port_based_numbered")
+
+    @staticmethod
     def run_all():
         """Run all unit tests"""
         tests = [
@@ -171,6 +194,8 @@ class UnitTests:
             UnitTests.test_http_prefix,
             UnitTests.test_snippet_definition,
             UnitTests.test_global_settings,
+            UnitTests.test_port_based_route,
+            UnitTests.test_port_based_numbered,
         ]
 
         print("=" * 60)
@@ -381,6 +406,45 @@ class IntegrationTests:
         assert result and "multi-import" in result.lower(), f"Expected multi-import response, got: {result}"
         print("[PASS] test_multi_import")
 
+    # =========================================================================
+    # Port-Based Server Tests
+    # =========================================================================
+
+    @staticmethod
+    def test_port_based_server_connectivity():
+        """Test: Port-based server route on :3000"""
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "5", f"http://{CADDY_SERVER}:3000"],
+                capture_output=True, text=True, timeout=7
+            )
+            assert result.returncode == 0 and result.stdout, f"Port 3000 not accessible"
+            assert "port-based" in result.stdout.lower() or "3000" in result.stdout.lower(), \
+                f"Expected port-based server response, got: {result.stdout}"
+            print("[PASS] test_port_based_server_connectivity")
+        except subprocess.TimeoutExpired:
+            raise AssertionError("Timeout connecting to port 3000")
+        except Exception as e:
+            raise AssertionError(f"Failed to connect to port 3000: {e}")
+
+    @staticmethod
+    def test_port_based_server_config():
+        """Test: Port-based server creates separate server in Caddy config"""
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "5", f"http://{CADDY_SERVER}:{CADDY_API_PORT}/config/apps/http/servers"],
+                capture_output=True, text=True, timeout=7
+            )
+            servers = json.loads(result.stdout)
+            # Check that a port-based server exists
+            port_servers = [name for name in servers.keys() if 'port_3000' in name or ':3000' in str(servers[name].get('listen', []))]
+            assert port_servers, f"No port-based server found for :3000. Servers: {list(servers.keys())}"
+            print(f"[PASS] test_port_based_server_config (server: {port_servers[0]})")
+        except json.JSONDecodeError as e:
+            raise AssertionError(f"Invalid JSON response: {e}")
+        except Exception as e:
+            raise AssertionError(f"Failed to verify port-based server config: {e}")
+
     @staticmethod
     def run_all():
         """Run all integration tests"""
@@ -417,6 +481,9 @@ class IntegrationTests:
             IntegrationTests.test_transport_tls_implicit_protocol,
             # Multi-import fix
             IntegrationTests.test_multi_import,
+            # Port-based server
+            IntegrationTests.test_port_based_server_connectivity,
+            IntegrationTests.test_port_based_server_config,
         ]
 
         passed = 0
