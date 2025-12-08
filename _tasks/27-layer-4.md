@@ -103,7 +103,7 @@ caddy.layer4_1.route.proxy: "host:8883"
 
 **Bug fixes**:
 - Null config handling from fresh Caddy instances
-- Layer4 detection uses GET/PUT instead of POST /load (was replacing entire config)
+- Layer4 detection uses read-only GET (avoids race condition where PUT could wipe existing L4 config)
 
 ## Test Results
 

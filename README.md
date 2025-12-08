@@ -166,6 +166,30 @@ labels:
   caddy.reverse_proxy: "{{upstreams 8080}}"
 ```
 
+### Layer4 (TCP/UDP) Routing
+
+Route raw TCP/UDP traffic (not HTTP) through Caddy. Requires Caddy built with [caddy-l4](https://github.com/mholt/caddy-l4) module.
+
+```yaml
+labels:
+  # Simple TCP proxy (e.g., MQTT broker)
+  caddy.layer4: ":1883"
+  caddy.layer4.route.proxy: "{{upstreams 11883}}"
+
+  # With SNI matching (TLS passthrough)
+  caddy.layer4: ":443"
+  caddy.layer4.@sni: "tls sni *.example.com"
+  caddy.layer4.route.proxy: "192.168.1.50:443"
+
+  # Multiple L4 routes (numbered)
+  caddy.layer4_0: ":1883"
+  caddy.layer4_0.route.proxy: "{{upstreams 1883}}"
+  caddy.layer4_1: ":8883"
+  caddy.layer4_1.route.proxy: "{{upstreams 8883}}"
+```
+
+**Note:** If Caddy doesn't have the Layer4 module, the agent logs a warning and skips L4 routes (HTTP routes still work).
+
 ### Snippet Sharing
 
 Define snippets on host1, use them on all hosts:
