@@ -159,11 +159,11 @@ caddy_2.reverse_proxy.transport.tls_insecure_skip_verify: ""
 
 This format ensures proper merging when imported. See `docs/CADDY-DOCKER-PROXY-BUG.md` for details on caddy-docker-proxy limitations.
 
-## Docker Compose Files
+## Docker Compose Files (in tests/)
 
-- `docker-compose-prod-server.yml` - Caddy with caddy-docker-proxy + global config
-- `docker-compose-prod-agent2.yml` - Agent + test services (host2)
-- `docker-compose-prod-agent3.yml` - Agent + test services (host3)
+- `tests/docker-compose-prod-server.yml` - Caddy with caddy-docker-proxy + global config
+- `tests/docker-compose-prod-agent2.yml` - Agent + test services (host2)
+- `tests/docker-compose-prod-agent3.yml` - Agent + test services (host3)
 
 ## Deployment
 
@@ -171,36 +171,36 @@ This format ensures proper merging when imported. See `docs/CADDY-DOCKER-PROXY-B
 
 ```bash
 # Build and deploy all hosts
-./deploy-hosts.sh --build
+./tests/deploy-hosts.sh --build
 
 # Deploy single host
-./deploy-hosts.sh host1 --build
+./tests/deploy-hosts.sh host1 --build
 
 # Deploy without starting containers
-./deploy-hosts.sh --build --no-start
+./tests/deploy-hosts.sh --build --no-start
 
 # Cleanup all hosts
-./cleanup-hosts.sh
+./tests/cleanup-hosts.sh
 
 # Cleanup with volume pruning
-./cleanup-hosts.sh --volumes
+./tests/cleanup-hosts.sh --volumes
 ```
 
 ### Manual Deployment
 
 ```bash
 # Build images
-docker build -f Dockerfile.Caddy -t caddy-docker-proxy:latest .
-docker save caddy-docker-proxy:latest | gzip > caddy-docker-proxy.tar.gz
+docker build -f tests/Dockerfile.Caddy -t caddy-docker-proxy:latest tests/
+docker save caddy-docker-proxy:latest | gzip > tests/caddy-docker-proxy.tar.gz
 docker build -t caddy-agent:latest .
-docker save caddy-agent:latest | gzip > caddy-agent.tar.gz
+docker save caddy-agent:latest | gzip > tests/caddy-agent.tar.gz
 
 # Deploy host1 (server)
-scp caddy-docker-proxy.tar.gz docker-compose-prod-server.yml root@192.168.0.96:/root/caddy-multihost/
+scp tests/caddy-docker-proxy.tar.gz tests/docker-compose-prod-server.yml root@192.168.0.96:/root/caddy-multihost/
 ssh root@192.168.0.96 "cd /root/caddy-multihost && gunzip -c caddy-docker-proxy.tar.gz | docker load && docker compose -f docker-compose-prod-server.yml up -d"
 
 # Deploy host2/host3 (agents)
-scp caddy-agent.tar.gz docker-compose-prod-agent2.yml root@192.168.0.98:/root/caddy-multihost/
+scp tests/caddy-agent.tar.gz tests/docker-compose-prod-agent2.yml root@192.168.0.98:/root/caddy-multihost/
 ssh root@192.168.0.98 "cd /root/caddy-multihost && gunzip -c caddy-agent.tar.gz | docker load && docker compose -f docker-compose-prod-agent2.yml up -d"
 ```
 
@@ -268,35 +268,39 @@ ssh root@192.168.0.99 "cd /root/caddy-multihost && docker compose -f docker-comp
 ## File Structure
 
 ```
-_caddy-testing/
-├── caddy-agent-watch.py          # Remote agent script
-├── Dockerfile                     # Agent image
-├── Dockerfile.Caddy              # Caddy + docker-proxy + cloudflare
-├── docker-compose-prod-server.yml # Server (caddy-docker-proxy)
-├── docker-compose-prod-agent2.yml # Agent host2
-├── docker-compose-prod-agent3.yml # Agent host3
-├── deploy-hosts.sh               # Deploy to test hosts
-├── cleanup-hosts.sh              # Cleanup test hosts
-├── test_all.py                   # Comprehensive test suite
+caddy-multihost-agent/
+├── caddy-agent-watch.py          # Agent script (production)
+├── Dockerfile                     # Agent image (production)
+├── CLAUDE.md                      # This file
+├── README.md                      # Project overview
 ├── docs/
 │   └── CADDY-DOCKER-PROXY-BUG.md # Known caddy-docker-proxy limitations
-└── CLAUDE.md                      # This file
+└── tests/                         # Test infrastructure
+    ├── Dockerfile.Caddy          # Caddy + docker-proxy + cloudflare + layer4
+    ├── docker-compose-prod-server.yml  # Server config
+    ├── docker-compose-prod-agent2.yml  # Agent host2 config
+    ├── docker-compose-prod-agent3.yml  # Agent host3 config
+    ├── deploy-hosts.sh           # Deploy to test hosts
+    ├── cleanup-hosts.sh          # Cleanup test hosts
+    ├── test_all.py               # Comprehensive test suite
+    ├── .env.example              # Environment template
+    └── README.md                 # Test documentation
 ```
 
 ## Automated Testing
 
 ```bash
 # Run all tests
-python test_all.py
+python tests/test_all.py
 
 # Run unit tests only (no remote hosts needed)
-python test_all.py --unit
+python tests/test_all.py --unit
 
 # Run integration tests only (requires deployed hosts)
-python test_all.py --integration
+python tests/test_all.py --integration
 
 # Run server mode tests only (requires host1 with caddy-agent-server)
-python test_all.py --server-mode
+python tests/test_all.py --server-mode
 ```
 
 ## Debugging

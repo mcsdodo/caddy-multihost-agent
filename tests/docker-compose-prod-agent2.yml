@@ -199,3 +199,19 @@ services:
     labels:
       caddy: ":3000"
       caddy.reverse_proxy: "{{upstreams 9350}}"
+
+  # Test - Layer4 TCP proxy (MQTT broker)
+  # Caddy Layer4 listens on :1883 and proxies to host2:11883
+  test-layer4-mqtt:
+    image: eclipse-mosquitto:2
+    container_name: test-layer4-mqtt
+    restart: unless-stopped
+    network_mode: host
+    command: mosquitto -c /mosquitto-no-auth.conf
+    volumes:
+      - ./mosquitto.conf:/mosquitto-no-auth.conf:ro
+    labels:
+      # Layer4 TCP proxy: external :1883 -> internal :11883
+      # Uses {{upstreams}} to resolve to host IP for remote agent
+      caddy.layer4: ":1883"
+      caddy.layer4.route.proxy: "{{upstreams 11883}}"

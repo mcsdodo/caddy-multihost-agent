@@ -134,6 +134,7 @@ def get_published_port(container, internal_port):
 def get_caddy_routes():
     """Get routes from Docker containers based on labels"""
     routes = []
+    layer4_routes = []  # Layer4 routes (TCP/UDP)
     global_settings = {}
     snippets = {}
     host_ip = get_effective_host_ip()
@@ -182,7 +183,11 @@ def get_caddy_routes():
         routes.extend(container_routes)
         tls_dns_policies.extend(container_tls_policies)
 
-    return routes, global_settings, tls_dns_policies
+        # Parse Layer4 routes
+        container_l4_routes = parse_layer4_labels(container, labels, host_ip)
+        layer4_routes.extend(container_l4_routes)
+
+    return routes, global_settings, tls_dns_policies, layer4_routes
 
 def parse_globals_and_snippets(labels):
     """Extract global settings and snippet definitions from labels.
@@ -714,6 +719,107 @@ def parse_handle_directives(config):
 
     return handle_directives
 
+def parse_layer4_labels(container, labels, host_ip):
+    """Parse Layer4 (TCP/UDP) labels from container.
+
+    Label format (following caddy-docker-proxy convention):
+        caddy.layer4: ":1883"                    # Listen address
+        caddy.layer4.route.proxy: "host:port"    # Upstream (or {{upstreams PORT}})
+        caddy.layer4.@sni: "tls sni *.domain"    # Optional: SNI matcher
+
+    Numbered format for multiple L4 routes:
+        caddy.layer4_0: ":1883"
+        caddy.layer4_0.route.proxy: "host:1883"
+        caddy.layer4_1: ":8883"
+        caddy.layer4_1.route.proxy: "host:8883"
+
+    Returns list of Layer4 server configs for apps.layer4.servers
+    """
+    import re
+
+    l4_configs = {}  # route_num -> config dict
+
+    for label_key, label_value in labels.items():
+        if not label_key.startswith(f"{DOCKER_LABEL_PREFIX}.layer4"):
+            continue
+
+        # Match: caddy.layer4 or caddy.layer4_N or caddy.layer4.directive or caddy.layer4_N.directive
+        match = re.match(
+            f"^{re.escape(DOCKER_LABEL_PREFIX)}\\.layer4(?:_(\\d+))?(?:\\.(.+))?$",
+            label_key
+        )
+        if not match:
+            continue
+
+        route_num = match.group(1) or "0"
+        directive = match.group(2) or ""
+
+        if route_num not in l4_configs:
+            l4_configs[route_num] = {}
+
+        if not directive:
+            # Base label: caddy.layer4 or caddy.layer4_N (the listen address)
+            l4_configs[route_num]['listen'] = label_value
+        else:
+            l4_configs[route_num][directive] = label_value
+
+    # Build Layer4 server configs
+    l4_routes = []
+    for route_num, config in sorted(l4_configs.items()):
+        listen_addr = config.get('listen')
+        if not listen_addr:
+            logger.warning(f"Layer4 route {route_num}: missing listen address, skipping")
+            continue
+
+        # Get upstream from route.proxy
+        upstream = config.get('route.proxy')
+        if not upstream:
+            logger.warning(f"Layer4 route {route_num}: missing route.proxy, skipping")
+            continue
+
+        # Resolve {{upstreams PORT}} if used
+        upstream = resolve_upstreams(container, upstream, f"L4:{listen_addr}", host_ip)
+        if not upstream:
+            continue
+
+        # Build server name and route ID
+        server_name = f"{AGENT_ID}_{container.name}_l4_{route_num}"
+        route_id = f"{server_name}_route"
+
+        # Build route handlers
+        handle = [{
+            "handler": "proxy",
+            "upstreams": [{"dial": [upstream]}]
+        }]
+
+        # Build route with optional matcher
+        route = {
+            "@id": route_id,
+            "handle": handle
+        }
+
+        # Check for SNI matcher (@sni label)
+        sni_matcher = config.get('@sni')
+        if sni_matcher:
+            # Parse "tls sni *.domain.com" format
+            sni_match = re.match(r"tls\s+sni\s+(.+)", sni_matcher)
+            if sni_match:
+                sni_patterns = sni_match.group(1).split()
+                route["match"] = [{"tls": {"sni": sni_patterns}}]
+                logger.info(f"Layer4 route {route_num}: SNI matcher for {sni_patterns}")
+
+        # Create L4 server config
+        l4_server = {
+            "_server_name": server_name,
+            "listen": [listen_addr],
+            "routes": [route]
+        }
+
+        l4_routes.append(l4_server)
+        logger.info(f"Layer4 route: listen={listen_addr}, upstream={upstream}")
+
+    return l4_routes
+
 def resolve_upstreams(container, proxy_target, domain, host_ip):
     """Resolve {{upstreams PORT}} template to actual upstream address"""
     import re
@@ -770,9 +876,46 @@ def resolve_upstreams(container, proxy_target, domain, host_ip):
         logger.error(f"Failed to resolve {{{{upstreams {port}}}}} for {container.name}: {e}")
         return None
 
-def push_to_caddy(routes, global_settings=None, tls_dns_policies=None):
+def check_layer4_support(target_url, headers):
+    """Check if Caddy instance has Layer4 module installed.
+
+    We detect this by trying to PUT an empty layer4 config.
+    If module is not installed, Caddy returns 400 with "unrecognized key: layer4"
+    """
+    try:
+        # First check if layer4 already exists in config
+        response = requests.get(f"{target_url}/config/apps/layer4", headers=headers, timeout=5)
+        if response.status_code == 200:
+            logger.debug("Layer4 support: detected (already in config)")
+            return True
+
+        # Try to PUT apps/layer4 to create the path
+        # If module is not installed, Caddy returns 400 with "unrecognized" or similar
+        response = requests.put(
+            f"{target_url}/config/apps/layer4",
+            json={"servers": {}},
+            headers=headers,
+            timeout=5
+        )
+        if response.status_code == 200:
+            logger.debug("Layer4 support: detected (PUT accepted)")
+            return True
+        else:
+            error_text = response.text.lower()
+            if "unrecognized" in error_text or "unknown" in error_text:
+                logger.debug(f"Layer4 support: not available ({response.text})")
+                return False
+            # Some other error - assume L4 might be supported
+            logger.debug(f"Layer4 support: unknown ({response.status_code}: {response.text})")
+            return True
+    except Exception as e:
+        logger.debug(f"Layer4 support check failed: {e}")
+        return True  # Assume supported on error, let the actual push fail if not
+
+def push_to_caddy(routes, global_settings=None, tls_dns_policies=None, layer4_routes=None):
     """Push routes to Caddy server based on mode.
     Phase 2: Apply global settings and TLS DNS policies if provided.
+    Phase 3: Layer4 (TCP/UDP) routes support.
     """
     target_url = CADDY_URL
 
@@ -780,6 +923,8 @@ def push_to_caddy(routes, global_settings=None, tls_dns_policies=None):
         global_settings = {}
     if tls_dns_policies is None:
         tls_dns_policies = []
+    if layer4_routes is None:
+        layer4_routes = []
 
     # Build headers
     headers = {"Content-Type": "application/json"}
@@ -900,6 +1045,37 @@ def push_to_caddy(routes, global_settings=None, tls_dns_policies=None):
         merged_routes = merge_routes(local_routes, port_routes)
         config["apps"]["http"]["servers"][server_name]["routes"] = merged_routes
         logger.info(f"Port-based server {server_name}: {len(merged_routes)} route(s)")
+
+    # Handle Layer4 routes (TCP/UDP)
+    if layer4_routes:
+        # Check if Caddy instance supports Layer4 by probing the API
+        l4_supported = check_layer4_support(target_url, headers)
+        if not l4_supported:
+            logger.warning(f"⚠️  Caddy instance does not support Layer4 - skipping {len(layer4_routes)} L4 route(s)")
+            logger.warning("    To enable Layer4, build Caddy with: --with github.com/mholt/caddy-l4")
+        else:
+            if "layer4" not in config["apps"]:
+                config["apps"]["layer4"] = {"servers": {}}
+            if "servers" not in config["apps"]["layer4"]:
+                config["apps"]["layer4"]["servers"] = {}
+
+            l4_servers = config["apps"]["layer4"]["servers"]
+
+            # Remove old L4 servers from this agent
+            servers_to_remove = [
+                name for name in l4_servers.keys()
+                if name.startswith(f"{AGENT_ID}_")
+            ]
+            for name in servers_to_remove:
+                del l4_servers[name]
+
+            # Add new L4 servers
+            for l4_server in layer4_routes:
+                server_name = l4_server.pop("_server_name")
+                l4_servers[server_name] = l4_server
+                logger.info(f"Layer4 server added: {server_name} listening on {l4_server['listen']}")
+
+            logger.info(f"Layer4 servers: {len(layer4_routes)} from this agent, {len(l4_servers)} total")
 
     # Save updated config
     save_local_config(config)
@@ -1067,8 +1243,12 @@ def load_local_config():
         response = requests.get(f"{target_url}/config/", headers=headers, timeout=5)
         if response.status_code == 200:
             config = response.json()
-            logger.info("📥 Fetched existing config from Caddy")
-            return config
+            # Handle empty/null config from Caddy (fresh start)
+            if config is None or config == {}:
+                logger.info("📥 Caddy returned empty config, using defaults")
+            else:
+                logger.info("📥 Fetched existing config from Caddy")
+                return config
     except Exception as e:
         logger.warning(f"Could not fetch existing config from Caddy: {e}")
 
@@ -1174,8 +1354,8 @@ def merge_routes(local_routes, new_routes):
 
 def sync_config():
     logger.info("🔄 Syncing config...")
-    routes, global_settings, tls_dns_policies = get_caddy_routes()
-    push_to_caddy(routes, global_settings, tls_dns_policies)
+    routes, global_settings, tls_dns_policies, layer4_routes = get_caddy_routes()
+    push_to_caddy(routes, global_settings, tls_dns_policies, layer4_routes)
 
 # =============================================================================
 # Route Recovery Mechanism
@@ -1187,7 +1367,7 @@ last_sync_time = 0
 sync_lock = threading.Lock()
 
 def get_our_route_count():
-    """Get count of our routes currently in Caddy"""
+    """Get count of our routes currently in Caddy (HTTP + Layer4)"""
     try:
         headers = {}
         if CADDY_API_TOKEN:
@@ -1195,7 +1375,8 @@ def get_our_route_count():
 
         count = 0
         our_route_ids = []
-        # Check all servers for our routes
+
+        # Check HTTP servers for our routes
         response = requests.get(f"{CADDY_URL}/config/apps/http/servers", headers=headers, timeout=5)
         if response.ok:
             servers = response.json() or {}
@@ -1206,9 +1387,17 @@ def get_our_route_count():
                     if route_id.startswith(f"{AGENT_ID}_"):
                         count += 1
                         our_route_ids.append(route_id)
-            logger.debug(f"Found {count} routes in Caddy for agent {AGENT_ID}: {our_route_ids}")
-        else:
-            logger.debug(f"Failed to get routes from Caddy: {response.status_code}")
+
+        # Check Layer4 servers for our routes
+        response_l4 = requests.get(f"{CADDY_URL}/config/apps/layer4/servers", headers=headers, timeout=5)
+        if response_l4.ok:
+            l4_servers = response_l4.json() or {}
+            for server_name in l4_servers.keys():
+                if server_name.startswith(f"{AGENT_ID}_"):
+                    count += 1
+                    our_route_ids.append(f"L4:{server_name}")
+
+        logger.debug(f"Found {count} routes in Caddy for agent {AGENT_ID}: {our_route_ids}")
         return count
     except Exception as e:
         logger.debug(f"Error getting route count: {e}")
@@ -1217,10 +1406,11 @@ def get_our_route_count():
 def get_expected_route_count():
     """Get count of routes we should have (from local Docker containers)"""
     try:
-        routes, _, _ = get_caddy_routes()
+        routes, _, _, layer4_routes = get_caddy_routes()
         route_ids = [r.get("@id", "unknown") for r in routes]
-        logger.debug(f"Expected {len(routes)} routes from Docker: {route_ids}")
-        return len(routes)
+        l4_count = len(layer4_routes)
+        logger.debug(f"Expected {len(routes)} HTTP routes + {l4_count} L4 routes from Docker: {route_ids}")
+        return len(routes) + l4_count
     except Exception as e:
         logger.debug(f"Error getting expected route count: {e}")
         return 0

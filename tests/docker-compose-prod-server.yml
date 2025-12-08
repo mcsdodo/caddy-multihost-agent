@@ -49,7 +49,7 @@ services:
       caddy_20: http://*.lan
       caddy_20.reverse_proxy: "192.168.0.96:80"
 
-      # Admin API proxy
+      # Admin API proxy for remote agents
       caddy_30: ":2020"
       caddy_30.reverse_proxy: "localhost:2019"
       caddy_30.reverse_proxy.header_up: "Host localhost:2019"

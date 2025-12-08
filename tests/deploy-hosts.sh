@@ -26,21 +26,22 @@ NC='\033[0m' # No Color
 BUILD_IMAGES=false
 START_CONTAINERS=true
 
-# Get script directory
+# Get script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 build_images() {
     echo -e "${BLUE}=== Building Docker images ===${NC}\n"
 
-    # Build caddy-docker-proxy
+    # Build caddy-docker-proxy (Dockerfile.Caddy is in tests/)
     echo -e "${YELLOW}Building caddy-docker-proxy...${NC}"
     docker build -f "${SCRIPT_DIR}/Dockerfile.Caddy" -t caddy-docker-proxy:latest "${SCRIPT_DIR}"
     docker save caddy-docker-proxy:latest | gzip > "${SCRIPT_DIR}/caddy-docker-proxy.tar.gz"
     echo -e "${GREEN}✓ caddy-docker-proxy built${NC}\n"
 
-    # Build caddy-agent
+    # Build caddy-agent (Dockerfile is in project root)
     echo -e "${YELLOW}Building caddy-agent...${NC}"
-    docker build -t caddy-agent:latest "${SCRIPT_DIR}"
+    docker build -t caddy-agent:latest "${PROJECT_ROOT}"
     docker save caddy-agent:latest | gzip > "${SCRIPT_DIR}/caddy-agent.tar.gz"
     echo -e "${GREEN}✓ caddy-agent built${NC}\n"
 }
@@ -252,5 +253,5 @@ esac
 if [ "$START_CONTAINERS" = true ]; then
     echo ""
     echo -e "${BLUE}Run tests with:${NC}"
-    echo "  python test_all.py --integration"
+    echo "  python tests/test_all.py --integration"
 fi
