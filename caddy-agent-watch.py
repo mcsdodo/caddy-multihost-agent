@@ -879,35 +879,26 @@ def resolve_upstreams(container, proxy_target, domain, host_ip):
 def check_layer4_support(target_url, headers):
     """Check if Caddy instance has Layer4 module installed.
 
-    We detect this by trying to PUT an empty layer4 config.
-    If module is not installed, Caddy returns 400 with "unrecognized key: layer4"
+    Detection via read-only probing only - no config modification.
+    This avoids race conditions where a PUT could wipe existing L4 config.
     """
     try:
-        # First check if layer4 already exists in config
+        # Check if layer4 already exists in config
         response = requests.get(f"{target_url}/config/apps/layer4", headers=headers, timeout=5)
         if response.status_code == 200:
-            logger.debug("Layer4 support: detected (already in config)")
+            logger.debug("Layer4 support: detected (config exists)")
             return True
 
-        # Try to PUT apps/layer4 to create the path
-        # If module is not installed, Caddy returns 400 with "unrecognized" or similar
-        response = requests.put(
-            f"{target_url}/config/apps/layer4",
-            json={"servers": {}},
-            headers=headers,
-            timeout=5
-        )
-        if response.status_code == 200:
-            logger.debug("Layer4 support: detected (PUT accepted)")
-            return True
-        else:
-            error_text = response.text.lower()
-            if "unrecognized" in error_text or "unknown" in error_text:
-                logger.debug(f"Layer4 support: not available ({response.text})")
-                return False
-            # Some other error - assume L4 might be supported
-            logger.debug(f"Layer4 support: unknown ({response.status_code}: {response.text})")
-            return True
+        # 404 could mean "no config yet" or "module not installed"
+        # Check if the error message indicates missing module
+        error_text = response.text.lower()
+        if "unrecognized" in error_text or "unknown" in error_text:
+            logger.debug(f"Layer4 support: not available ({response.text})")
+            return False
+
+        # Can't determine from GET alone - assume supported, let actual push fail if not
+        logger.debug(f"Layer4 support: assuming yes (GET returned {response.status_code})")
+        return True
     except Exception as e:
         logger.debug(f"Layer4 support check failed: {e}")
         return True  # Assume supported on error, let the actual push fail if not
