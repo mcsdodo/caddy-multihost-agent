@@ -131,6 +131,36 @@ def get_published_port(container, internal_port):
         logger.error(f"Error getting published port for {container.name}: {e}")
         return None
 
+def normalize_dial_address(address):
+    """Normalize dial address to ensure it has a port.
+
+    Caddy's dial field requires host:port format. If no port is specified,
+    default to port 80.
+
+    Args:
+        address: The address string (e.g., "192.168.0.121", "localhost:3000")
+
+    Returns:
+        Normalized address with port (e.g., "192.168.0.121:80", "localhost:3000")
+    """
+    if not address:
+        return address
+
+    # Check if address already has a port
+    # Handle IPv6 addresses like [::1]:8080
+    if address.startswith('['):
+        # IPv6 format: [host]:port or [host]
+        if ']:' in address:
+            return address  # Already has port
+        return f"{address}:80"
+
+    # IPv4 or hostname: check for colon
+    if ':' in address:
+        return address  # Already has port
+
+    # No port specified, default to 80
+    return f"{address}:80"
+
 def get_caddy_routes():
     """Get routes from Docker containers based on labels"""
     routes = []
@@ -439,7 +469,7 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
                 # Build handle section
                 handle = [{
                     "handler": "reverse_proxy",
-                    "upstreams": [{"dial": proxy_target}]
+                    "upstreams": [{"dial": normalize_dial_address(proxy_target)}]
                 }]
 
                 # Apply transport and header config if present
@@ -483,7 +513,7 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
         # Build handle section with reverse_proxy
         handle = [{
             "handler": "reverse_proxy",
-            "upstreams": [{"dial": proxy_target}]
+            "upstreams": [{"dial": normalize_dial_address(proxy_target)}]
         }]
 
         # Phase 2: Add TLS configuration if present
@@ -789,7 +819,7 @@ def parse_layer4_labels(container, labels, host_ip):
         # Build route handlers
         handle = [{
             "handler": "proxy",
-            "upstreams": [{"dial": [upstream]}]
+            "upstreams": [{"dial": [normalize_dial_address(upstream)]}]
         }]
 
         # Build route with optional matcher

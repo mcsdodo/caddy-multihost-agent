@@ -56,9 +56,13 @@ deploy_host1() {
         return 1
     fi
 
-    # Check if image exists
+    # Check if images exist
     if [ ! -f "${SCRIPT_DIR}/caddy-docker-proxy.tar.gz" ]; then
         echo -e "${RED}✗ caddy-docker-proxy.tar.gz not found. Run with --build first.${NC}"
+        return 1
+    fi
+    if [ ! -f "${SCRIPT_DIR}/caddy-agent.tar.gz" ]; then
+        echo -e "${RED}✗ caddy-agent.tar.gz not found. Run with --build first.${NC}"
         return 1
     fi
 
@@ -68,14 +72,16 @@ deploy_host1() {
     # Copy files
     echo "  Copying files..."
     scp -q "${SCRIPT_DIR}/caddy-docker-proxy.tar.gz" "${host_ssh}:/root/caddy-multihost/"
+    scp -q "${SCRIPT_DIR}/caddy-agent.tar.gz" "${host_ssh}:/root/caddy-multihost/"
     scp -q "${SCRIPT_DIR}/docker-compose-prod-server.yml" "${host_ssh}:/root/caddy-multihost/"
     scp -q "${SCRIPT_DIR}/Dockerfile.Caddy" "${host_ssh}:/root/caddy-multihost/"
     echo -e "${GREEN}  ✓ Files copied${NC}"
 
-    # Load image
-    echo "  Loading Docker image..."
+    # Load images
+    echo "  Loading Docker images..."
     ssh "${host_ssh}" "cd /root/caddy-multihost && gunzip -c caddy-docker-proxy.tar.gz | docker load" > /dev/null
-    echo -e "${GREEN}  ✓ Image loaded${NC}"
+    ssh "${host_ssh}" "cd /root/caddy-multihost && gunzip -c caddy-agent.tar.gz | docker load" > /dev/null
+    echo -e "${GREEN}  ✓ Images loaded${NC}"
 
     # Start containers
     if [ "$START_CONTAINERS" = true ]; then

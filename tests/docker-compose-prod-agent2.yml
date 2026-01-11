@@ -200,6 +200,21 @@ services:
       caddy: ":3000"
       caddy.reverse_proxy: "{{upstreams 9350}}"
 
+  # Test - reverse_proxy without port (should default to :80)
+  # Tests that "192.168.0.98" becomes "192.168.0.98:80" in dial
+  test-portless-reverse-proxy:
+    image: hashicorp/http-echo
+    container_name: test-portless-reverse-proxy
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -listen=:80
+      - -text=SUCCESS - Portless reverse_proxy defaults to port 80 (host2)
+    labels:
+      caddy: portless-test.lan
+      # Using plain IP without port - should default to :80
+      caddy.reverse_proxy: "192.168.0.98"
+
   # Test - Layer4 TCP proxy (MQTT broker)
   # Caddy Layer4 listens on :1883 and proxies to host2:11883
   test-layer4-mqtt:

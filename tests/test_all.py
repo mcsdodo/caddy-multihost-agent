@@ -221,6 +221,49 @@ class UnitTests:
         print("[PASS] test_layer4_sni_matcher")
 
     @staticmethod
+    def test_portless_reverse_proxy_normalization():
+        """Test: reverse_proxy without port should default to :80"""
+        # Read the main module source and extract the normalize function
+        # This avoids importing the module (which initializes Docker client)
+        import importlib.util
+        import types
+
+        module_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "caddy-agent-watch.py")
+        with open(module_path, 'r', encoding='utf-8') as f:
+            source = f.read()
+
+        # Check if the function exists in source
+        assert "def normalize_dial_address" in source, \
+            "normalize_dial_address function not found in caddy-agent-watch.py"
+
+        # Extract just the function definition and exec it
+        import re
+        func_match = re.search(r'(def normalize_dial_address\([^)]*\):.*?)(?=\ndef |\nclass |\Z)', source, re.DOTALL)
+        assert func_match, "Could not extract normalize_dial_address function"
+
+        func_code = func_match.group(1)
+        local_ns = {}
+        exec(func_code, local_ns)
+        normalize_dial_address = local_ns['normalize_dial_address']
+
+        # Test cases: (input, expected_output)
+        test_cases = [
+            ("192.168.0.121", "192.168.0.121:80"),      # Plain IP
+            ("192.168.0.121:8080", "192.168.0.121:8080"),  # IP with port
+            ("localhost", "localhost:80"),              # Hostname without port
+            ("localhost:3000", "localhost:3000"),       # Hostname with port
+            ("backend:8080", "backend:8080"),           # Service name with port
+            ("backend", "backend:80"),                  # Service name without port
+            ("10.0.0.1:443", "10.0.0.1:443"),          # IP with port 443
+        ]
+
+        for input_val, expected in test_cases:
+            result = normalize_dial_address(input_val)
+            assert result == expected, f"normalize_dial_address('{input_val}') = '{result}', expected '{expected}'"
+
+        print("[PASS] test_portless_reverse_proxy_normalization")
+
+    @staticmethod
     def run_all():
         """Run all unit tests"""
         tests = [
@@ -237,6 +280,7 @@ class UnitTests:
             UnitTests.test_layer4_basic,
             UnitTests.test_layer4_numbered,
             UnitTests.test_layer4_sni_matcher,
+            UnitTests.test_portless_reverse_proxy_normalization,
         ]
 
         print("=" * 60)
@@ -556,6 +600,50 @@ class IntegrationTests:
             raise AssertionError(f"Failed to test MQTT publish: {e}")
 
     @staticmethod
+    def test_portless_reverse_proxy_config():
+        """Test: reverse_proxy without port creates dial with :80"""
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "5", f"http://{CADDY_SERVER}:{CADDY_API_PORT}/config/apps/http/servers"],
+                capture_output=True, text=True, timeout=7
+            )
+            config = json.loads(result.stdout)
+
+            # Find the portless-test.lan route
+            route_found = False
+            for srv_name, srv in config.items():
+                for route in srv.get("routes", []):
+                    match = route.get("match", [{}])
+                    if match and "portless-test.lan" in match[0].get("host", []):
+                        route_found = True
+                        # Check the dial address has port 80
+                        handle = route.get("handle", [])
+                        for h in handle:
+                            if h.get("handler") == "reverse_proxy":
+                                upstreams = h.get("upstreams", [])
+                                assert upstreams, "reverse_proxy missing upstreams"
+                                dial = upstreams[0].get("dial", "")
+                                assert dial.endswith(":80"), f"Expected dial to end with :80, got '{dial}'"
+                                break
+                        break
+                if route_found:
+                    break
+
+            assert route_found, "portless-test.lan route not found in Caddy config"
+            print("[PASS] test_portless_reverse_proxy_config")
+        except json.JSONDecodeError as e:
+            raise AssertionError(f"Invalid JSON response: {e}")
+        except Exception as e:
+            raise AssertionError(f"Failed to verify portless reverse_proxy config: {e}")
+
+    @staticmethod
+    def test_portless_reverse_proxy_connectivity():
+        """Test: portless reverse_proxy route is accessible"""
+        result = IntegrationTests.run_curl("portless-test.lan", port=443, https=True)
+        assert result and "portless" in result.lower(), f"Expected portless response, got: {result}"
+        print("[PASS] test_portless_reverse_proxy_connectivity")
+
+    @staticmethod
     def run_all():
         """Run all integration tests"""
         print("=" * 60)
@@ -598,6 +686,9 @@ class IntegrationTests:
             IntegrationTests.test_layer4_config_exists,
             IntegrationTests.test_layer4_mqtt_proxy,
             IntegrationTests.test_layer4_mqtt_publish,
+            # Portless reverse_proxy
+            IntegrationTests.test_portless_reverse_proxy_config,
+            IntegrationTests.test_portless_reverse_proxy_connectivity,
         ]
 
         passed = 0
