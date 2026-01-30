@@ -126,6 +126,7 @@ Each agent:
 | `CADDY_URL` | `http://localhost:2019` | Caddy Admin API URL |
 | `AGENT_ID` | hostname | Unique identifier (prefixes route IDs) |
 | `DOCKER_LABEL_PREFIX` | `caddy` | Label prefix to watch |
+| `DOCKER_PROXY_URL` | empty | Docker API proxy URL (overrides `DOCKER_HOST`) |
 | `HOST_IP` | auto-detected | IP for upstream addresses |
 | `SNIPPET_API_PORT` | `0` (disabled) | Port to serve snippet API |
 | `SNIPPET_SOURCES` | empty | Comma-separated URLs to fetch snippets |

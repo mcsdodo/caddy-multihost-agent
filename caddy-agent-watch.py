@@ -17,6 +17,7 @@ AGENT_ID = os.getenv("AGENT_ID", socket.gethostname())
 CADDY_API_TOKEN = os.getenv("CADDY_API_TOKEN", "")
 DOCKER_LABEL_PREFIX = os.getenv("DOCKER_LABEL_PREFIX", "caddy")
 AGENT_FILTER_LABEL = os.getenv("AGENT_FILTER_LABEL", None)
+DOCKER_PROXY_URL = os.getenv("DOCKER_PROXY_URL", "")  # Docker API proxy URL (e.g., tcp://proxy:2375)
 
 # Recovery mechanism configuration
 HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "5"))    # seconds, 0 to disable
@@ -40,7 +41,8 @@ _effective_host_ip = None
 _snippet_cache = {}
 _snippet_cache_time = 0
 
-client = docker.DockerClient(base_url='unix://var/run/docker.sock')
+_docker_base_url = DOCKER_PROXY_URL.strip() or os.getenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+client = docker.DockerClient(base_url=_docker_base_url)
 
 # Configure logging with LOG_LEVEL env var
 log_level = getattr(logging, LOG_LEVEL, logging.INFO)
