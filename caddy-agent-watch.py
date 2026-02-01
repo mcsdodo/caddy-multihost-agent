@@ -430,7 +430,7 @@ def parse_imports(config):
             args = parts[1:]
             parsed.append((snippet_name, args))
 
-    logger.debug(f"Parsed imports: {parsed}")
+    logger.debug(f"Parsed imports: {len(parsed)}")
     return parsed
 
 def substitute_import_args(value, args):
@@ -445,8 +445,6 @@ def substitute_import_args(value, args):
         return args[idx] if idx < len(args) else ""
 
     replaced = re.sub(r"\{args\[(\d+)\]\}", repl, value)
-    if replaced != value:
-        logger.debug(f"Substituted import args in value: '{value}' -> '{replaced}'")
     return replaced
 
 def apply_snippet_imports(config, snippets, route_num):
@@ -458,7 +456,7 @@ def apply_snippet_imports(config, snippets, route_num):
     merged_config = {}
     for snippet_name, args in imports:
         if snippet_name in snippets:
-            logger.info(f"Applying snippet '{snippet_name}' to route {route_num} (args={args})")
+            logger.info(f"Applying snippet '{snippet_name}' to route {route_num} (args redacted)")
             snippet_config = snippets[snippet_name]
             substituted = {
                 k: substitute_import_args(v, args)
@@ -477,7 +475,6 @@ def apply_snippet_imports(config, snippets, route_num):
             config.pop(key, None)
 
     logger.info(f"Merged config keys after import: {list(config.keys())}")
-    logger.debug(f"Merged config values after import: {config}")
     return config
 
 def parse_remote_ip_ranges(value):
@@ -831,7 +828,13 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
                     f"Building handle-block routes: domains={domains}, http_only={http_only_flag}, suffix='{suffix}'"
                 )
 
-                for handle_key in sorted(handle_blocks.keys(), key=lambda k: int(k.split('_')[1])):
+                def handle_sort_key(key):
+                    try:
+                        return (0, int(key.split('_', 1)[1]))
+                    except (IndexError, ValueError):
+                        return (1, key)
+
+                for handle_key in sorted(handle_blocks.keys(), key=handle_sort_key):
                     block = handle_blocks[handle_key]
                     block_directives = block.get('directives', {})
 
