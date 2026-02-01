@@ -385,7 +385,9 @@ def fetch_remote_snippets():
 def parse_imports(config):
     """Parse snippet imports from config.
     Supports: import, import_N with optional args (Caddyfile-style).
+    Also supports multiple comma-separated snippets per import value.
     Example: "proxy_config http://host:70" -> name=proxy_config, args=["http://host:70"]
+    Example: "snippet_a, snippet_b arg1" -> two imports
     """
     import re
     import shlex
@@ -413,15 +415,20 @@ def parse_imports(config):
 
     parsed = []
     for _, value in imports:
-        try:
-            parts = shlex.split(value)
-        except Exception:
-            parts = value.split()
-        if not parts:
-            continue
-        snippet_name = parts[0]
-        args = parts[1:]
-        parsed.append((snippet_name, args))
+        # Allow multiple comma-separated snippet specs per import value
+        for segment in value.split(','):
+            segment = segment.strip()
+            if not segment:
+                continue
+            try:
+                parts = shlex.split(segment)
+            except Exception:
+                parts = segment.split()
+            if not parts:
+                continue
+            snippet_name = parts[0]
+            args = parts[1:]
+            parsed.append((snippet_name, args))
 
     logger.debug(f"Parsed imports: {parsed}")
     return parsed
