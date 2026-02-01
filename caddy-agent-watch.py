@@ -382,6 +382,287 @@ def fetch_remote_snippets():
         logger.warning(f"Using stale snippet cache ({len(_snippet_cache)} snippets)")
     return _snippet_cache
 
+def parse_imports(config):
+    """Parse snippet imports from config.
+    Supports: import, import_N with optional args (Caddyfile-style).
+    Example: "proxy_config http://host:70" -> name=proxy_config, args=["http://host:70"]
+    """
+    import re
+    import shlex
+
+    imports = []
+    for key, value in config.items():
+        if key == 'import' or key.startswith('import_'):
+            imports.append((key, value))
+
+    if not imports:
+        logger.debug("No snippet imports found in route config")
+        return []
+
+    def sort_key(item):
+        key = item[0]
+        if key == 'import':
+            return (-1, 0)
+        match = re.match(r"import_(\d+)", key)
+        if match:
+            return (0, int(match.group(1)))
+        return (1, key)
+
+    imports.sort(key=sort_key)
+    logger.debug(f"Found {len(imports)} import directive(s): {[k for k, _ in imports]}")
+
+    parsed = []
+    for _, value in imports:
+        try:
+            parts = shlex.split(value)
+        except Exception:
+            parts = value.split()
+        if not parts:
+            continue
+        snippet_name = parts[0]
+        args = parts[1:]
+        parsed.append((snippet_name, args))
+
+    logger.debug(f"Parsed imports: {parsed}")
+    return parsed
+
+def substitute_import_args(value, args):
+    """Replace {args[N]} placeholders in a snippet value."""
+    import re
+
+    if not isinstance(value, str):
+        return value
+
+    def repl(match):
+        idx = int(match.group(1))
+        return args[idx] if idx < len(args) else ""
+
+    replaced = re.sub(r"\{args\[(\d+)\]\}", repl, value)
+    if replaced != value:
+        logger.debug(f"Substituted import args in value: '{value}' -> '{replaced}'")
+    return replaced
+
+def apply_snippet_imports(config, snippets, route_num):
+    """Apply snippet imports with args and merge into route config."""
+    imports = parse_imports(config)
+    if not imports:
+        return config
+
+    merged_config = {}
+    for snippet_name, args in imports:
+        if snippet_name in snippets:
+            logger.info(f"Applying snippet '{snippet_name}' to route {route_num} (args={args})")
+            snippet_config = snippets[snippet_name]
+            substituted = {
+                k: substitute_import_args(v, args)
+                for k, v in snippet_config.items()
+            }
+            merged_config = {**merged_config, **substituted}
+        else:
+            logger.warning(f"Snippet '{snippet_name}' not found for route {route_num}")
+
+    # Route config overrides all snippets
+    config = {**merged_config, **config}
+
+    # Remove import keys from final config
+    for key in list(config.keys()):
+        if key == 'import' or key.startswith('import_'):
+            config.pop(key, None)
+
+    logger.info(f"Merged config keys after import: {list(config.keys())}")
+    logger.debug(f"Merged config values after import: {config}")
+    return config
+
+def parse_remote_ip_ranges(value):
+    parts = value.split()
+    if parts and parts[0] == 'remote_ip':
+        parts = parts[1:]
+    return parts
+
+def parse_named_matchers(config):
+    """Parse named matchers like @name.remote_ip or @name.not."""
+    matchers = {}
+
+    for key, value in config.items():
+        if not key.startswith('@'):
+            continue
+        parts = key.split('.', 1)
+        if len(parts) != 2:
+            continue
+        name, directive = parts
+
+        matcher = matchers.get(name, {})
+        if directive == 'remote_ip':
+            ranges = parse_remote_ip_ranges(value)
+            if ranges:
+                matcher['remote_ip'] = {'ranges': ranges}
+        elif directive == 'not':
+            ranges = parse_remote_ip_ranges(value)
+            if ranges:
+                matcher['not'] = [{'remote_ip': {'ranges': ranges}}]
+
+        if matcher:
+            matchers[name] = matcher
+
+    if matchers:
+        logger.debug(f"Parsed named matchers: {matchers}")
+    else:
+        logger.debug("No named matchers found in route config")
+
+    return matchers
+
+def parse_handle_blocks(config):
+    """Parse handle_N blocks and their directives."""
+    handle_blocks = {}
+
+    for key, value in config.items():
+        if not key.startswith('handle_'):
+            continue
+        parts = key.split('.', 1)
+        handle_key = parts[0]
+        directive = parts[1] if len(parts) > 1 else ''
+
+        if handle_key not in handle_blocks:
+            handle_blocks[handle_key] = {
+                'matcher': None,
+                'directives': {}
+            }
+
+        if not directive:
+            if isinstance(value, str) and value.strip().startswith('@'):
+                handle_blocks[handle_key]['matcher'] = value.strip()
+        else:
+            handle_blocks[handle_key]['directives'][directive] = value
+
+    if handle_blocks:
+        logger.debug(f"Parsed handle blocks: {handle_blocks}")
+    else:
+        logger.debug("No handle blocks found in route config")
+    return handle_blocks
+
+def parse_header_handler(value):
+    parts = value.split(None, 1)
+    if len(parts) != 2:
+        return None
+    header_name = parts[0]
+    header_value = parts[1].strip('"')
+    return {
+        "handler": "headers",
+        "response": {
+            "set": {
+                header_name: [header_value]
+            }
+        }
+    }
+
+def parse_respond_handler(value):
+    import shlex
+
+    try:
+        parts = shlex.split(value)
+    except Exception:
+        parts = value.split()
+
+    if not parts:
+        return None
+
+    body = parts[0]
+    status_code = 200
+    if len(parts) > 1 and parts[1].isdigit():
+        status_code = int(parts[1])
+
+    return {
+        "handler": "static_response",
+        "body": body,
+        "status_code": status_code
+    }
+
+def parse_transport_config_for_prefix(config, prefix):
+    """Parse transport config for a reverse_proxy prefix (e.g., handle_0.reverse_proxy)."""
+    transport_config = {}
+    base = f"{prefix}.transport"
+
+    has_transport = any(
+        key == base or key.startswith(f"{base}.")
+        for key in config.keys()
+    )
+    if not has_transport:
+        return transport_config
+
+    for key, value in config.items():
+        if key == base:
+            transport_config['transport'] = {'protocol': value}
+        elif key.startswith(f"{base}."):
+            directive = key[len(base) + 1:]
+
+            if 'transport' not in transport_config:
+                transport_config['transport'] = {'protocol': 'http'}
+
+            if directive == 'tls':
+                transport_config['transport']['tls'] = {}
+            elif directive == 'tls_insecure_skip_verify':
+                if 'tls' not in transport_config['transport']:
+                    transport_config['transport']['tls'] = {}
+                transport_config['transport']['tls']['insecure_skip_verify'] = True
+                logger.info("Transport: TLS insecure skip verify enabled")
+            elif directive == 'resolvers':
+                transport_config['transport']['resolver'] = {
+                    'addresses': value.split()
+                }
+
+    return transport_config
+
+def parse_header_config_for_prefix(config, prefix):
+    """Parse reverse_proxy.header_up/down for a prefixed directive."""
+    headers_config = {}
+    up_prefix = f"{prefix}.header_up"
+    down_prefix = f"{prefix}.header_down"
+
+    for key, value in config.items():
+        if key.startswith(up_prefix):
+            if 'headers' not in headers_config:
+                headers_config['headers'] = {}
+            if 'request' not in headers_config['headers']:
+                headers_config['headers']['request'] = {}
+
+            if value.startswith('-'):
+                header_name = value[1:].strip()
+                if 'delete' not in headers_config['headers']['request']:
+                    headers_config['headers']['request']['delete'] = []
+                headers_config['headers']['request']['delete'].append(header_name)
+            else:
+                clean_value = value[1:].strip() if value.startswith('+') else value
+                parts = clean_value.split(None, 1)
+                if len(parts) == 2:
+                    header_name = parts[0]
+                    header_value = parts[1].strip('"')
+                    if 'set' not in headers_config['headers']['request']:
+                        headers_config['headers']['request']['set'] = {}
+                    headers_config['headers']['request']['set'][header_name] = [header_value]
+
+        elif key.startswith(down_prefix):
+            if 'headers' not in headers_config:
+                headers_config['headers'] = {}
+            if 'response' not in headers_config['headers']:
+                headers_config['headers']['response'] = {}
+
+            if value.startswith('-'):
+                header_name = value[1:].strip()
+                if 'delete' not in headers_config['headers']['response']:
+                    headers_config['headers']['response']['delete'] = []
+                headers_config['headers']['response']['delete'].append(header_name)
+            else:
+                clean_value = value[1:].strip() if value.startswith('+') else value
+                parts = clean_value.split(None, 1)
+                if len(parts) == 2:
+                    header_name = parts[0]
+                    header_value = parts[1].strip('"')
+                    if 'set' not in headers_config['headers']['response']:
+                        headers_config['headers']['response']['set'] = {}
+                    headers_config['headers']['response']['set'][header_name] = [header_value]
+
+    return headers_config
+
 def parse_container_labels(container, labels, host_ip, snippets=None):
     """Parse container labels to extract route configurations.
     Supports both simple labels (caddy) and numbered labels (caddy_0, caddy_1).
@@ -430,32 +711,24 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
             logger.info(f"Skipping route {route_num} (no domain or snippet)")
             continue
 
-        # Phase 2: Apply imports from snippets (supports multiple comma-separated snippets)
-        if 'import' in config:
-            import_value = config['import']
-            snippet_names = [s.strip() for s in import_value.split(',')]
-            merged_config = {}
-            for snippet_name in snippet_names:
-                if snippet_name in snippets:
-                    logger.info(f"Applying snippet '{snippet_name}' to route {route_num}")
-                    # Merge snippet config (later snippets override earlier)
-                    merged_config = {**merged_config, **snippets[snippet_name]}
-                else:
-                    logger.warning(f"Snippet '{snippet_name}' not found for route {route_num}")
-            # Route config overrides all snippets
-            config = {**merged_config, **config}
-            logger.info(f"Merged config keys after import: {list(config.keys())}")
+        # Phase 2: Apply imports from snippets (supports import_N and args)
+        config = apply_snippet_imports(config, snippets, route_num)
+
+        # Parse named matchers and handle blocks (Caddyfile-style)
+        named_matchers = parse_named_matchers(config)
+        handle_blocks = parse_handle_blocks(config)
 
         proxy_target = config.get('reverse_proxy')
-        if not proxy_target:
+        if not proxy_target and not handle_blocks:
             # Check if this is a wildcard/TLS-only route without reverse_proxy
-            # For now, skip routes without reverse_proxy
+            # For now, skip routes without reverse_proxy or handle blocks
             continue
 
-        # Resolve {{upstreams PORT}} syntax
-        proxy_target = resolve_upstreams(container, proxy_target, domain, host_ip)
-        if not proxy_target:
-            continue
+        # Resolve {{upstreams PORT}} syntax (only when using top-level reverse_proxy)
+        if proxy_target:
+            proxy_target = resolve_upstreams(container, proxy_target, domain, host_ip)
+            if not proxy_target:
+                continue
 
         # Check for port-based server (e.g., ":2020")
         if domain.startswith(':'):
@@ -512,53 +785,133 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
         if route_num != "0":
             base_route_id += f"_{route_num}"
 
-        # Build handle section with reverse_proxy
-        handle = [{
-            "handler": "reverse_proxy",
-            "upstreams": [{"dial": normalize_dial_address(proxy_target)}]
-        }]
-
         # Phase 2: Add TLS configuration if present
         tls_config = parse_tls_config(config)
-        transport_config = parse_transport_config(config)
-        header_config = parse_header_config(config)
 
-        if transport_config:
-            # Apply transport config to reverse_proxy handler
-            handle[0].update(transport_config)
+        # Build handle section
+        handle = []
+        if not handle_blocks:
+            handle = [{
+                "handler": "reverse_proxy",
+                "upstreams": [{"dial": normalize_dial_address(proxy_target)}]
+            }]
 
-        # Phase 3: Apply header manipulation
-        if header_config:
-            handle[0].update(header_config)
+            transport_config = parse_transport_config(config)
+            header_config = parse_header_config(config)
 
-        # Phase 2: Add handle directives (handle.abort, etc.)
-        handle_directives = parse_handle_directives(config)
-        if handle_directives:
-            # Insert handle directives before reverse_proxy
-            handle = handle_directives + handle
+            if transport_config:
+                handle[0].update(transport_config)
+
+            if header_config:
+                handle[0].update(header_config)
+
+            handle_directives = parse_handle_directives(config)
+            if handle_directives:
+                handle = handle_directives + handle
 
         # Create separate routes for HTTP-only and HTTPS domains
         # This allows mixed labels like: http://foo.lan, bar.lacny.me
 
-        if http_only_domains:
-            route_id = base_route_id if not https_domains else f"{base_route_id}_http"
-            route = {
-                "@id": route_id,
-                "handle": copy.deepcopy(handle),
-                "match": [{"host": http_only_domains}],
-                "_http_only": True
-            }
-            routes.append(route)
+        if handle_blocks:
+            # Build routes from handle blocks (handle_0, handle_1, ...)
+            def build_routes_for_domains(domains, http_only_flag):
+                if not domains:
+                    return
 
-        if https_domains:
-            route_id = base_route_id if not http_only_domains else f"{base_route_id}_https"
-            route = {
-                "@id": route_id,
-                "handle": copy.deepcopy(handle),
-                "match": [{"host": https_domains}],
-                "_http_only": False
-            }
-            routes.append(route)
+                suffix = "_http" if http_only_flag and https_domains else "_https" if (not http_only_flag and http_only_domains) else ""
+
+                logger.debug(
+                    f"Building handle-block routes: domains={domains}, http_only={http_only_flag}, suffix='{suffix}'"
+                )
+
+                for handle_key in sorted(handle_blocks.keys(), key=lambda k: int(k.split('_')[1])):
+                    block = handle_blocks[handle_key]
+                    block_directives = block.get('directives', {})
+
+                    logger.debug(
+                        f"Processing {handle_key}: matcher={block.get('matcher')}, directives={list(block_directives.keys())}"
+                    )
+
+                    handlers = []
+
+                    # header handler
+                    if 'header' in block_directives:
+                        header_handler = parse_header_handler(block_directives['header'])
+                        if header_handler:
+                            handlers.append(header_handler)
+
+                    # respond handler
+                    if 'respond' in block_directives:
+                        respond_handler = parse_respond_handler(block_directives['respond'])
+                        if respond_handler:
+                            handlers.append(respond_handler)
+
+                    # reverse_proxy handler
+                    if 'reverse_proxy' in block_directives:
+                        block_proxy = block_directives.get('reverse_proxy')
+                        logger.debug(f"{handle_key}: reverse_proxy target before resolve: {block_proxy}")
+                        block_proxy = resolve_upstreams(container, block_proxy, domain, host_ip)
+                        if block_proxy:
+                            logger.debug(f"{handle_key}: reverse_proxy target after resolve: {block_proxy}")
+                            rp_handler = {
+                                "handler": "reverse_proxy",
+                                "upstreams": [{"dial": normalize_dial_address(block_proxy)}]
+                            }
+
+                            transport_config = parse_transport_config_for_prefix(config, f"{handle_key}.reverse_proxy")
+                            header_config = parse_header_config_for_prefix(config, f"{handle_key}.reverse_proxy")
+                            if transport_config:
+                                rp_handler.update(transport_config)
+                            if header_config:
+                                rp_handler.update(header_config)
+
+                            handlers.append(rp_handler)
+
+                    if not handlers:
+                        logger.debug(f"{handle_key}: no handlers built, skipping")
+                        continue
+
+                    match = {"host": domains}
+                    matcher_name = block.get('matcher')
+                    if matcher_name and matcher_name in named_matchers:
+                        matcher_def = named_matchers[matcher_name]
+                        match.update(matcher_def)
+                        logger.debug(f"{handle_key}: applied matcher {matcher_name} -> {matcher_def}")
+                    elif matcher_name:
+                        logger.warning(f"Matcher '{matcher_name}' not found for route {route_num}")
+
+                    route_id = f"{base_route_id}{suffix}_{handle_key}"
+                    route = {
+                        "@id": route_id,
+                        "handle": handlers,
+                        "match": [match],
+                        "_http_only": http_only_flag
+                    }
+                    routes.append(route)
+                    logger.info(f"Added handle-block route: {route_id}")
+
+            build_routes_for_domains(http_only_domains, True)
+            build_routes_for_domains(https_domains, False)
+        else:
+            if http_only_domains:
+                route_id = base_route_id if not https_domains else f"{base_route_id}_http"
+                route = {
+                    "@id": route_id,
+                    "handle": copy.deepcopy(handle),
+                    "match": [{"host": http_only_domains}],
+                    "_http_only": True
+                }
+                routes.append(route)
+
+            if https_domains:
+                route_id = base_route_id if not http_only_domains else f"{base_route_id}_https"
+                route = {
+                    "@id": route_id,
+                    "handle": copy.deepcopy(handle),
+                    "match": [{"host": https_domains}],
+                    "_http_only": False
+                }
+                routes.append(route)
 
             # Add TLS config if present (only for HTTPS domains)
             if tls_config:
@@ -646,6 +999,10 @@ def parse_transport_config(config):
                     transport_config['transport']['tls'] = {}
                 transport_config['transport']['tls']['insecure_skip_verify'] = True
                 logger.info("Transport: TLS insecure skip verify enabled")
+            elif directive == 'resolvers':
+                transport_config['transport']['resolver'] = {
+                    'addresses': value.split()
+                }
 
     return transport_config
 
