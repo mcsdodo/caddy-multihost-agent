@@ -1036,21 +1036,35 @@ def push_to_caddy(routes, global_settings=None, tls_dns_policies=None, layer4_ro
         logger.info(f"DEBUG: Calling apply_tls_dns_policies with {len(tls_dns_policies)} policies")
         apply_tls_dns_policies(config, tls_dns_policies)
 
-    # Merge HTTPS routes to HTTPS server
-    if https_routes and https_server:
-        if "routes" not in servers[https_server]:
-            servers[https_server]["routes"] = []
-        local_routes = servers[https_server].get("routes", [])
-        merged_routes = merge_routes(local_routes, https_routes)
-        config["apps"]["http"]["servers"][https_server]["routes"] = merged_routes
+    # Merge our routes into each server exactly once.
+    #
+    # Two rules here, both learned the hard way:
+    #  - A server gets merged even when we generate no route for it, or an
+    #    orphan of ours (a container that is gone) stays in Caddy forever.
+    #    That orphan then makes routes_need_sync() see the right number of
+    #    routes and stop pushing, so a route that goes missing never returns.
+    #  - HTTPS and HTTP-only can resolve to the SAME server. Merging it twice
+    #    makes the second merge prune what the first one just added, because
+    #    merge_routes() drops every route of ours that is not in the list it
+    #    is given.
+    routes_by_server = {}
+    if https_server:
+        routes_by_server.setdefault(https_server, []).extend(https_routes)
+    if http_server:
+        routes_by_server.setdefault(http_server, []).extend(http_only_routes)
 
-    # Merge HTTP-only routes to HTTP server
-    if http_only_routes and http_server:
-        if "routes" not in servers[http_server]:
-            servers[http_server]["routes"] = []
-        local_routes = servers[http_server].get("routes", [])
-        merged_routes = merge_routes(local_routes, http_only_routes)
-        config["apps"]["http"]["servers"][http_server]["routes"] = merged_routes
+    # An empty result can also mean the Docker enumeration failed. Merging that
+    # would delete every route this agent owns, so only prune when we actually
+    # generated something.
+    generated_any = bool(https_routes or http_only_routes or port_based_routes)
+
+    if generated_any:
+        for server_name, server_routes in routes_by_server.items():
+            if "routes" not in servers[server_name]:
+                servers[server_name]["routes"] = []
+            local_routes = servers[server_name].get("routes", [])
+            merged_routes = merge_routes(local_routes, server_routes)
+            config["apps"]["http"]["servers"][server_name]["routes"] = merged_routes
 
     # Handle port-based servers (e.g., :2020 for Admin API proxy)
     for port, port_routes in port_based_routes.items():
@@ -1389,15 +1403,18 @@ def sync_config():
 last_sync_time = 0
 sync_lock = threading.Lock()
 
-def get_our_route_count():
-    """Get count of our routes currently in Caddy (HTTP + Layer4)"""
+def get_our_route_ids():
+    """Get the IDs of our routes currently in Caddy (HTTP + Layer4).
+
+    Returns None if Caddy could not be read, which is not the same as "we own
+    no routes".
+    """
     try:
         headers = {}
         if CADDY_API_TOKEN:
             headers["Authorization"] = f"Bearer {CADDY_API_TOKEN}"
 
-        count = 0
-        our_route_ids = []
+        our_route_ids = set()
 
         # Check HTTP servers for our routes
         response = requests.get(f"{CADDY_URL}/config/apps/http/servers", headers=headers, timeout=5)
@@ -1408,8 +1425,7 @@ def get_our_route_count():
                 for r in routes:
                     route_id = r.get("@id", "")
                     if route_id.startswith(f"{AGENT_ID}_"):
-                        count += 1
-                        our_route_ids.append(route_id)
+                        our_route_ids.add(route_id)
 
         # Check Layer4 servers for our routes
         response_l4 = requests.get(f"{CADDY_URL}/config/apps/layer4/servers", headers=headers, timeout=5)
@@ -1417,37 +1433,57 @@ def get_our_route_count():
             l4_servers = response_l4.json() or {}
             for server_name in l4_servers.keys():
                 if server_name.startswith(f"{AGENT_ID}_"):
-                    count += 1
-                    our_route_ids.append(f"L4:{server_name}")
+                    our_route_ids.add(f"L4:{server_name}")
 
-        logger.debug(f"Found {count} routes in Caddy for agent {AGENT_ID}: {our_route_ids}")
-        return count
+        logger.debug(f"Found {len(our_route_ids)} routes in Caddy for agent {AGENT_ID}: {sorted(our_route_ids)}")
+        return our_route_ids
     except Exception as e:
-        logger.debug(f"Error getting route count: {e}")
-        return -1  # Error state
+        logger.debug(f"Error reading our routes from Caddy: {e}")
+        return None  # Error state
 
-def get_expected_route_count():
-    """Get count of routes we should have (from local Docker containers)"""
+def get_expected_route_ids():
+    """Get the IDs of the routes we should have (from local Docker containers).
+
+    Returns None if the containers could not be read. Returning an empty set
+    there would read as "we expect no routes" and prune every live route.
+    """
     try:
         routes, _, _, layer4_routes = get_caddy_routes()
-        route_ids = [r.get("@id", "unknown") for r in routes]
-        l4_count = len(layer4_routes)
-        logger.debug(f"Expected {len(routes)} HTTP routes + {l4_count} L4 routes from Docker: {route_ids}")
-        return len(routes) + l4_count
+        route_ids = set(r.get("@id", "unknown") for r in routes)
+        route_ids.update(f"L4:{r.get('_server_name')}" for r in layer4_routes)
+        logger.debug(f"Expected {len(route_ids)} routes from Docker: {sorted(route_ids)}")
+        return route_ids
     except Exception as e:
-        logger.debug(f"Error getting expected route count: {e}")
-        return 0
+        logger.debug(f"Error getting expected routes: {e}")
+        return None
 
 def routes_need_sync():
-    """Check if our routes are missing or incomplete.
-    Returns: True if sync needed, False if OK, None if can't determine (API error)
+    """Check whether Caddy disagrees with the routes our containers ask for.
+
+    Compares route IDs, never counts. A stale route of ours makes two different
+    sets the same size, and a count check then reads that as "in sync" and stops
+    pushing - so a route that dropped out during a redeploy never comes back.
+
+    Only a MISSING route asks for a sync. A stale route on its own does not:
+    a port-based or Layer4 server whose container is gone is never merged, so
+    treating it as a reason to push would repeat that push forever. The next
+    sync prunes the orphans it can reach.
+
+    Returns: True if sync needed, False if OK, None if can't determine.
     """
-    current = get_our_route_count()
-    if current == -1:
+    current = get_our_route_ids()
+    if current is None:
         return None  # Can't determine, API error
-    expected = get_expected_route_count()
-    need_sync = current < expected
-    logger.debug(f"Route check: current={current}, expected={expected}, need_sync={need_sync}")
+    expected = get_expected_route_ids()
+    if expected is None:
+        return None  # Can't determine, Docker error
+    missing = expected - current
+    stale = current - expected
+    need_sync = bool(missing)
+    logger.debug(
+        f"Route check: missing={sorted(missing)}, "
+        f"stale={sorted(stale)}, need_sync={need_sync}"
+    )
     return need_sync
 
 def safe_sync():

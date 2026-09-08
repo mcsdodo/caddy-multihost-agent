@@ -975,6 +975,279 @@ class ConfigTests:
 
 
 # =============================================================================
+# SYNC DECISION TESTS - route recovery logic (no remote hosts needed)
+# =============================================================================
+
+AGENT_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "caddy-agent-watch.py")
+
+
+def load_agent_module():
+    """Import caddy-agent-watch.py with a stub docker package.
+
+    The agent builds a DockerClient at import time. The stub keeps the import
+    free of a live Docker daemon, so the recovery logic can be tested against
+    the real functions instead of a copy of them.
+    """
+    import types
+    import importlib.util
+
+    stub = types.ModuleType("docker")
+
+    class _StubDockerClient:
+        def __init__(self, *args, **kwargs):
+            self.containers = types.SimpleNamespace(list=lambda *a, **kw: [])
+
+    stub.DockerClient = _StubDockerClient
+    stub.from_env = lambda *a, **kw: _StubDockerClient()
+
+    saved = sys.modules.get("docker")
+    sys.modules["docker"] = stub
+    try:
+        spec = importlib.util.spec_from_file_location("caddy_agent_watch", AGENT_SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if saved is None:
+            del sys.modules["docker"]
+        else:
+            sys.modules["docker"] = saved
+
+
+class SyncDecisionTests:
+    """Tests for routes_need_sync() and orphan pruning"""
+
+    @staticmethod
+    def test_sync_needed_when_a_generated_route_is_missing():
+        """Test: a missing route is detected even if a stale route keeps the counts equal"""
+        m = load_agent_module()
+        m.AGENT_ID = "infra"
+        m.get_our_route_ids = lambda: {"infra_dashy", "infra_stale"}
+        m.get_expected_route_ids = lambda: {"infra_dashy", "infra_kniha-jazd"}
+        assert m.routes_need_sync() is True
+        print("[PASS] test_sync_needed_when_a_generated_route_is_missing")
+
+    @staticmethod
+    def test_no_sync_loop_when_caddy_holds_only_a_stale_route_of_ours():
+        """Test: an orphan alone does not sync, because some orphans cannot be pruned
+
+        A port-based or Layer4 server whose container is gone is never merged,
+        so its orphan would drive a push every few seconds forever. The next
+        sync prunes what it can; a stale route on its own is not a reason to
+        push.
+        """
+        m = load_agent_module()
+        m.AGENT_ID = "infra"
+        m.get_our_route_ids = lambda: {"infra_dashy", "infra_stale"}
+        m.get_expected_route_ids = lambda: {"infra_dashy"}
+        assert m.routes_need_sync() is False
+        print("[PASS] test_no_sync_loop_when_caddy_holds_only_a_stale_route_of_ours")
+
+    @staticmethod
+    def test_no_sync_when_the_two_sets_match():
+        """Test: an agreeing config does not sync"""
+        m = load_agent_module()
+        m.AGENT_ID = "infra"
+        m.get_our_route_ids = lambda: {"infra_dashy"}
+        m.get_expected_route_ids = lambda: {"infra_dashy"}
+        assert m.routes_need_sync() is False
+        print("[PASS] test_no_sync_when_the_two_sets_match")
+
+    @staticmethod
+    def test_unknown_when_the_caddy_api_fails():
+        """Test: an unreadable Caddy is 'unknown', not 'in sync'"""
+        m = load_agent_module()
+        m.AGENT_ID = "infra"
+        m.get_our_route_ids = lambda: None
+        m.get_expected_route_ids = lambda: {"infra_dashy"}
+        assert m.routes_need_sync() is None
+        print("[PASS] test_unknown_when_the_caddy_api_fails")
+
+    @staticmethod
+    def test_unknown_when_route_generation_fails():
+        """Test: a Docker failure is 'unknown', never 'we expect no routes'"""
+        m = load_agent_module()
+        m.AGENT_ID = "infra"
+
+        def explode():
+            raise RuntimeError("docker unreachable")
+
+        m.get_caddy_routes = explode
+        assert m.get_expected_route_ids() is None
+        m.get_our_route_ids = lambda: {"infra_dashy"}
+        assert m.routes_need_sync() is None
+        print("[PASS] test_unknown_when_route_generation_fails")
+
+    @staticmethod
+    def test_push_prunes_our_orphan_from_the_http_server():
+        """Test: the :80 server is pruned even when no http:// route is generated"""
+        m = load_agent_module()
+        pushed = _push_and_capture(
+            m,
+            local_config=_config_with_orphan_on_port_80(),
+            routes=[{
+                "@id": "infra_dashy",
+                "handle": [],
+                "match": [{"host": ["dashy.lacny.me"]}],
+                "_http_only": False,
+            }],
+        )
+        srv80_ids = [r.get("@id") for r in pushed["apps"]["http"]["servers"]["srv1"]["routes"]]
+        assert "infra_orphan" not in srv80_ids, srv80_ids
+        print("[PASS] test_push_prunes_our_orphan_from_the_http_server")
+
+    @staticmethod
+    def test_push_keeps_another_agents_route_on_the_http_server():
+        """Test: pruning never touches a route belonging to a different agent"""
+        m = load_agent_module()
+        pushed = _push_and_capture(
+            m,
+            local_config=_config_with_orphan_on_port_80(),
+            routes=[{
+                "@id": "infra_dashy",
+                "handle": [],
+                "match": [{"host": ["dashy.lacny.me"]}],
+                "_http_only": False,
+            }],
+        )
+        srv80_ids = [r.get("@id") for r in pushed["apps"]["http"]["servers"]["srv1"]["routes"]]
+        assert "omada_other" in srv80_ids, srv80_ids
+        print("[PASS] test_push_keeps_another_agents_route_on_the_http_server")
+
+    @staticmethod
+    def test_push_prunes_nothing_when_no_route_was_generated():
+        """Test: an empty route list means Docker told us nothing, so keep what is live"""
+        m = load_agent_module()
+        pushed = _push_and_capture(
+            m,
+            local_config=_config_with_orphan_on_port_80(),
+            routes=[],
+        )
+        srv80_ids = [r.get("@id") for r in pushed["apps"]["http"]["servers"]["srv1"]["routes"]]
+        assert "infra_orphan" in srv80_ids, srv80_ids
+        print("[PASS] test_push_prunes_nothing_when_no_route_was_generated")
+
+    @staticmethod
+    def test_push_keeps_both_kinds_on_one_combined_server():
+        """Test: when one server takes both kinds, neither merge prunes the other"""
+        m = load_agent_module()
+        pushed = _push_and_capture(
+            m,
+            local_config={
+                "admin": {"listen": "0.0.0.0:2019"},
+                "apps": {"http": {"servers": {
+                    "combined": {"listen": [":2015"], "routes": []},
+                }}},
+            },
+            routes=[
+                {
+                    "@id": "infra_secure",
+                    "handle": [],
+                    "match": [{"host": ["secure.lacny.me"]}],
+                    "_http_only": False,
+                },
+                {
+                    "@id": "infra_plain",
+                    "handle": [],
+                    "match": [{"host": ["plain.lan"]}],
+                    "_http_only": True,
+                },
+            ],
+        )
+        ids = [r.get("@id") for r in pushed["apps"]["http"]["servers"]["combined"]["routes"]]
+        assert "infra_secure" in ids, ids
+        assert "infra_plain" in ids, ids
+        print("[PASS] test_push_keeps_both_kinds_on_one_combined_server")
+
+    @staticmethod
+    def run_all():
+        """Run all sync decision tests"""
+        print("=" * 60)
+        print("SYNC DECISION TESTS")
+        print("=" * 60)
+
+        tests = [
+            SyncDecisionTests.test_sync_needed_when_a_generated_route_is_missing,
+            SyncDecisionTests.test_no_sync_loop_when_caddy_holds_only_a_stale_route_of_ours,
+            SyncDecisionTests.test_no_sync_when_the_two_sets_match,
+            SyncDecisionTests.test_unknown_when_the_caddy_api_fails,
+            SyncDecisionTests.test_unknown_when_route_generation_fails,
+            SyncDecisionTests.test_push_prunes_our_orphan_from_the_http_server,
+            SyncDecisionTests.test_push_keeps_another_agents_route_on_the_http_server,
+            SyncDecisionTests.test_push_prunes_nothing_when_no_route_was_generated,
+            SyncDecisionTests.test_push_keeps_both_kinds_on_one_combined_server,
+        ]
+
+        passed = 0
+        for test in tests:
+            try:
+                test()
+                passed += 1
+            except Exception as e:
+                print(f"[FAIL] {test.__name__}: {e}")
+
+        print(f"\nPassed: {passed}/{len(tests)}")
+        return passed == len(tests)
+
+
+def _config_with_orphan_on_port_80():
+    """A live config holding one orphan of ours and one route of another agent on :80"""
+    return {
+        "admin": {"listen": "0.0.0.0:2019"},
+        "apps": {"http": {"servers": {
+            "srv0": {
+                "listen": [":443"],
+                "routes": [{
+                    "@id": "infra_dashy",
+                    "handle": [],
+                    "match": [{"host": ["dashy.lacny.me"]}],
+                }],
+            },
+            "srv1": {
+                "listen": [":80"],
+                "routes": [
+                    {"@id": "infra_orphan", "handle": [], "match": [{"host": ["gone.lan"]}]},
+                    {"@id": "omada_other", "handle": [], "match": [{"host": ["other.lan"]}]},
+                ],
+            },
+        }}},
+    }
+
+
+def _push_and_capture(module, local_config, routes):
+    """Run push_to_caddy against stubs and return the config it posted"""
+    import types
+
+    module.AGENT_ID = "infra"
+    module.load_local_config = lambda: local_config
+    module.save_local_config = lambda config: None
+    module.get_effective_host_ip = lambda: None
+    module.time = types.SimpleNamespace(sleep=lambda seconds: None)
+
+    captured = {}
+
+    class _Response:
+        status_code = 200
+        ok = True
+        text = ""
+
+        def json(self):
+            return {}
+
+    def _post(url, json=None, headers=None, **kwargs):
+        captured["config"] = json
+        return _Response()
+
+    module.requests = types.SimpleNamespace(
+        post=_post,
+        get=lambda *a, **kw: _Response(),
+    )
+
+    module.push_to_caddy(routes)
+    return captured["config"]
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -984,15 +1257,17 @@ def main():
     parser.add_argument("--integration", action="store_true", help="Run integration tests only")
     parser.add_argument("--server-mode", action="store_true", help="Run server mode tests only")
     parser.add_argument("--config", action="store_true", help="Run config tests only")
+    parser.add_argument("--sync", action="store_true", help="Run sync decision tests only")
     parser.add_argument("--snippet-api", action="store_true", help="Run snippet API tests only")
     args = parser.parse_args()
 
     # Default: run all
-    any_specific = args.unit or args.integration or args.server_mode or args.config or args.snippet_api
+    any_specific = args.unit or args.integration or args.server_mode or args.config or args.snippet_api or args.sync
     run_unit = args.unit or not any_specific
     run_integration = args.integration or not any_specific
     run_server_mode = args.server_mode or not any_specific
     run_config = args.config or not any_specific
+    run_sync = args.sync or not any_specific
     run_snippet_api = args.snippet_api or not any_specific
 
     results = []
@@ -1007,6 +1282,10 @@ def main():
 
     if run_config:
         results.append(("Config Tests", ConfigTests.run_all()))
+        print()
+
+    if run_sync:
+        results.append(("Sync Decision Tests", SyncDecisionTests.run_all()))
         print()
 
     if run_integration:
