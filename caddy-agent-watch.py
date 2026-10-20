@@ -203,7 +203,7 @@ def get_caddy_routes():
 
     # Log discovered snippets
     if snippets:
-        logger.info(f"Total snippets available: {len(snippets)} - {list(snippets.keys())}")
+        logger.debug(f"Total snippets available: {len(snippets)} - {list(snippets.keys())}")
     if global_settings:
         logger.info(f"Global settings: {list(global_settings.keys())}")
 
@@ -262,7 +262,7 @@ def parse_globals_and_snippets(labels):
             # Remove 'domain' from config
             snippet_config = {k: v for k, v in config.items() if k != 'domain'}
             snippets[snippet_name] = snippet_config
-            logger.info(f"Snippet defined: '{snippet_name}' with {len(snippet_config)} directive(s)")
+            logger.debug(f"Snippet defined: '{snippet_name}' with {len(snippet_config)} directive(s)")
             continue
 
         # Check if this is a global setting (no domain, only directives)
@@ -427,7 +427,7 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
 
         # Skip snippets and global settings (no domain or snippet pattern)
         if not domain or (domain.startswith('(') and domain.endswith(')')):
-            logger.info(f"Skipping route {route_num} (no domain or snippet)")
+            logger.debug(f"Skipping route {route_num} (no domain or snippet)")
             continue
 
         # Phase 2: Apply imports from snippets (supports multiple comma-separated snippets)
@@ -505,7 +505,7 @@ def parse_container_labels(container, labels, host_ip, snippets=None):
             else:
                 https_domains.append(d)
 
-        logger.info(f"Route: http_only_domains={http_only_domains}, https_domains={https_domains}, upstream='{proxy_target}'")
+        logger.debug(f"Route: http_only_domains={http_only_domains}, https_domains={https_domains}, upstream='{proxy_target}'")
 
         # Build route with agent metadata
         base_route_id = f"{AGENT_ID}_{container.name}"
@@ -576,7 +576,7 @@ def parse_tls_config(config):
     Supports: tls.dns, tls.resolvers
     """
     tls_config = {}
-    logger.info(f"parse_tls_config: checking config keys: {list(config.keys())}")
+    logger.debug(f"parse_tls_config: checking config keys: {list(config.keys())}")
 
     for key, value in config.items():
         if key.startswith('tls.'):
@@ -645,7 +645,7 @@ def parse_transport_config(config):
                 if 'tls' not in transport_config['transport']:
                     transport_config['transport']['tls'] = {}
                 transport_config['transport']['tls']['insecure_skip_verify'] = True
-                logger.info("Transport: TLS insecure skip verify enabled")
+                logger.debug("Transport: TLS insecure skip verify enabled")
 
     return transport_config
 
