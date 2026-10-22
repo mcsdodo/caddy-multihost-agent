@@ -43,6 +43,10 @@ services:
       # Expose Admin API for remote agents
       caddy_0: ":2020"
       caddy_0.reverse_proxy: "localhost:2019"
+      caddy_0.reverse_proxy.header_up_0: "Host {upstream_hostport}"
+      caddy_0.reverse_proxy.header_up_1: "-Sec-Fetch-Mode"
+      caddy_0.reverse_proxy.header_up_2: "-Sec-Fetch-Site"
+      caddy_0.reverse_proxy.header_up_3: "-Sec-Fetch-Dest"
 
   # Optional: agent for testing server mode
   caddy-agent:
@@ -307,6 +311,10 @@ services:
       # Admin API proxy for agents
       caddy_20: ":2020"
       caddy_20.reverse_proxy: "localhost:2019"
+      caddy_20.reverse_proxy.header_up_0: "Host {upstream_hostport}"
+      caddy_20.reverse_proxy.header_up_1: "-Sec-Fetch-Mode"
+      caddy_20.reverse_proxy.header_up_2: "-Sec-Fetch-Site"
+      caddy_20.reverse_proxy.header_up_3: "-Sec-Fetch-Dest"
 
   caddy-agent:
     image: mcsdodo/caddy-agent:latest
